@@ -1,16 +1,28 @@
-import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
+import { ConfigError, readEnvInteger, readEnvString, type Env } from '../config-env.js';
 import { GoogleHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface GoogleClientOptions {
-  /** API key. When omitted, read from GOOGLE_WORKSPACE_API_KEY in `credentialEnv`. */
-  apiKey?: string;
-  /** API base URL. When omitted, read from GOOGLE_WORKSPACE_BASE_URL in `credentialEnv`. */
-  baseUrl?: string;
+  /** The OAuth client id of the app. When omitted, read from GOOGLE_WORKSPACE_CLIENT_ID in `credentialEnv`. */
+  clientId?: string;
+  /** The OAuth client secret of the app. A secret. When omitted, read from GOOGLE_WORKSPACE_CLIENT_SECRET. */
+  clientSecret?: string;
   /**
-   * Where omitted credentials (apiKey, baseUrl) are read from. Defaults to
-   * process.env for the standalone server. The gateway passes `{}`, so an
-   * embedded instance only ever uses the credentials it was given.
+   * The refresh token the account's consent gave (authorization code flow
+   * with access_type=offline). A secret. When omitted, read from
+   * GOOGLE_WORKSPACE_REFRESH_TOKEN.
+   */
+  refreshToken?: string;
+  /**
+   * Called when the token endpoint answers with a refresh token that differs
+   * from the one in use. Google normally keeps the refresh token; a host that
+   * stores tokens saves a new one here.
+   */
+  onRefreshToken?: (refreshToken: string) => void | Promise<void>;
+  /**
+   * Where omitted credentials are read from. Defaults to process.env for the
+   * standalone server. The gateway passes `{}`, so an embedded instance only
+   * ever uses the credentials it was given.
    */
   credentialEnv?: Env;
   fetchImpl?: typeof fetch;
@@ -30,25 +42,87 @@ export interface GoogleClientOptions {
    * the response is returned to the caller instead.
    */
   retryBudgetMs?: number;
-  /** Allow a base URL outside UPSTREAM_HOST_SUFFIXES (env GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL=true). */
-  allowCustomBaseUrl?: boolean;
   /** Injectable for tests. */
   sleep?: (ms: number) => Promise<void>;
+  /** Injectable for tests: the clock used for the access token's lifetime. */
+  now?: () => number;
 }
 
 export type QueryValue = string | number | boolean | null | undefined;
 
-type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT';
 
-/** Header that carries the API key. Change it to match the upstream API; error text redaction follows it. */
-export const API_KEY_HEADER = 'X-API-Key';
+/** The header that carries the access token ("Authorization: Bearer ..."); error text redaction follows it. */
+export const API_KEY_HEADER = 'Authorization';
 
 /**
- * Hosts the API key may be sent to (exact host or any subdomain), e.g.
- * ['api.vendor.com']. Empty: any https host. Loopback http is always allowed
- * for local mocks.
+ * The Google APIs this server talks to, each at the root URL of Google's
+ * discovery document. Nothing else is ever sent a token: there is no option
+ * that changes these addresses.
  */
-export const UPSTREAM_HOST_SUFFIXES: readonly string[] = [];
+export const SERVICES = {
+  calendar: 'https://www.googleapis.com/calendar/v3',
+  sheets: 'https://sheets.googleapis.com/v4',
+  docs: 'https://docs.googleapis.com/v1',
+  people: 'https://people.googleapis.com/v1',
+  tasks: 'https://tasks.googleapis.com/tasks/v1',
+  userinfo: 'https://openidconnect.googleapis.com/v1',
+} as const;
+
+export type GoogleService = keyof typeof SERVICES;
+
+/** Google's token endpoint (https://developers.google.com/identity/protocols/oauth2/web-server). */
+export const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+
+/**
+ * The scopes this server needs, none of them restricted
+ * (https://support.google.com/cloud/answer/13464325): openid and email (who
+ * the account is), the calendar list and events, Sheets, Docs, Contacts and
+ * Tasks. No Gmail and no Drive scope.
+ */
+export const SCOPES = {
+  openid: 'openid',
+  email: 'email',
+  calendarList: 'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+  calendarEvents: 'https://www.googleapis.com/auth/calendar.events',
+  sheets: 'https://www.googleapis.com/auth/spreadsheets',
+  docs: 'https://www.googleapis.com/auth/documents',
+  contacts: 'https://www.googleapis.com/auth/contacts',
+  tasks: 'https://www.googleapis.com/auth/tasks',
+} as const;
+
+export const ALL_SCOPES: readonly string[] = Object.values(SCOPES);
+
+/** The name Google gives the `email` scope in a token answer. */
+const EMAIL_SCOPE_URL = 'https://www.googleapis.com/auth/userinfo.email';
+
+const ID = '[A-Za-z0-9_@.#%+-]{1,1024}';
+
+/**
+ * The only writes the client sends: service, method and path (relative to the
+ * service's root, percent-encoded as sent). Anything else is refused before a
+ * token is put in a header, whatever a tool or a policy says. There is no
+ * DELETE and no method for one: nothing is deleted, shared, sent by mail or
+ * moved to another owner.
+ */
+export const ALLOWED_WRITES: ReadonlyArray<{ service: GoogleService; method: 'POST' | 'PATCH' | 'PUT'; path: RegExp }> = [
+  { service: 'calendar', method: 'POST', path: new RegExp(`^/calendars/${ID}/events$`) },
+  { service: 'calendar', method: 'PATCH', path: new RegExp(`^/calendars/${ID}/events/${ID}$`) },
+  { service: 'sheets', method: 'POST', path: /^\/spreadsheets$/ },
+  { service: 'sheets', method: 'PUT', path: /^\/spreadsheets\/[A-Za-z0-9_-]{10,200}\/values\/[^/?#]{1,900}$/ },
+  { service: 'sheets', method: 'POST', path: /^\/spreadsheets\/[A-Za-z0-9_-]{10,200}\/values\/[^/?#]{1,900}:append$/ },
+  { service: 'docs', method: 'POST', path: /^\/documents$/ },
+  { service: 'docs', method: 'POST', path: /^\/documents\/[A-Za-z0-9_-]{10,200}:batchUpdate$/ },
+  { service: 'people', method: 'POST', path: /^\/people:createContact$/ },
+  { service: 'people', method: 'PATCH', path: /^\/people\/[A-Za-z0-9_-]{1,200}:updateContact$/ },
+  { service: 'tasks', method: 'POST', path: new RegExp(`^/lists/${ID}/tasks$`) },
+  { service: 'tasks', method: 'PATCH', path: new RegExp(`^/lists/${ID}/tasks/${ID}$`) },
+];
+
+/** An access token is renewed this long before it expires. */
+const TOKEN_EARLY_RENEWAL_MS = 60_000;
+
+const TOKEN_TEXT = /^[\x21-\x7e]{16,8192}$/;
 
 export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_LIMIT = 100 * 1024 * 1024;
@@ -56,7 +130,6 @@ const MAX_RESPONSE_BYTES_LIMIT = 100 * 1024 * 1024;
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 /** Largest delay accepted by Node timers. */
 const MAX_TIMER_MS = 2_147_483_647;
-/** Error codes (on `error.cause`) of connection-level failures worth retrying. */
 /** System error codes a network error may name: a fixed list, so no other text from a cause is ever shown. */
 const SHOWN_NETWORK_CODES: ReadonlySet<string> = new Set([
   'ECONNRESET',
@@ -79,6 +152,7 @@ const SHOWN_NETWORK_CODES: ReadonlySet<string> = new Set([
   'ERR_TLS_CERT_ALTNAME_INVALID',
 ]);
 
+/** Error codes (on `error.cause`) of connection-level failures worth retrying. */
 const TRANSIENT_NETWORK_CODES = new Set([
   'ECONNRESET',
   'ECONNREFUSED',
@@ -101,44 +175,73 @@ const TRANSIENT_NETWORK_CODES = new Set([
  * depend on tool annotations alone.
  */
 export interface UpstreamClient {
-  get<T>(path: string, query?: Record<string, QueryValue>): Promise<T>;
-  post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
-  patch<T>(path: string, body?: unknown): Promise<T>;
+  /** The scopes Google says the access covers, once a token has been fetched (undefined before). */
+  readonly grantedScopes?: readonly string[];
+  get<T>(service: GoogleService, path: string, query?: Record<string, QueryValue>): Promise<T>;
+  post<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
+  patch<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
+  put<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
 }
 
 /**
  * A view of the client that only allows GET. A read-only tool that needs a
- * POST (e.g. a search endpoint that takes a body) should get an explicit,
- * named method here rather than the full client.
+ * POST should get an explicit, named method here rather than the full client.
  */
 export function readOnlyClient(client: UpstreamClient, toolName: string): UpstreamClient {
   const refuse = (method: string) => async () => {
     throw new Error(`Read-only tool ${toolName} attempted an upstream ${method}; refused.`);
   };
   return {
-    get: (path, query) => client.get(path, query),
+    get grantedScopes() {
+      return client.grantedScopes;
+    },
+    get: (service, path, query) => client.get(service, path, query),
     post: refuse('POST'),
     patch: refuse('PATCH'),
+    put: refuse('PUT'),
   };
 }
 
+/** The token endpoint refused the app's access: our own text, nothing of the answer. */
+export class GoogleTokenError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(
+      `Google refused the access (HTTP ${status}). It may have been withdrawn or have expired; ` +
+        'the account gives the app access again.',
+    );
+    this.name = 'GoogleTokenError';
+    this.status = status;
+  }
+}
+
 /**
- * Client for the upstream API. Authenticates with a single API key header.
+ * Client for the Google APIs in SERVICES. The access token comes from the
+ * refresh token and the app's client id and secret at Google's token
+ * endpoint, and is sent as a Bearer token only to the hosts in SERVICES. It
+ * is kept in memory, renewed a minute before it expires, and renewed once
+ * when an API answers 401.
  *
- * Redirects are never followed, so the key cannot be forwarded to another
+ * Redirects are never followed, so no token can be forwarded to another
  * origin. Idempotent GETs are retried with backoff on throttling, gateway
  * errors and transient network failures; other methods are never retried.
- * A missing API key or base URL only fails when a request is made, so the
- * tool list can be read without credentials.
+ * Missing credentials only fail when a request is made, so the tool list can
+ * be read without credentials.
  *
- * Each client owns a SecretRedactor holding its own key and key header;
- * errors raised by the client, and the audit and tool results of calls
- * made through it, are redacted with it.
+ * Each client owns a SecretRedactor holding its client secret, its refresh
+ * token and the access token in use; errors raised by the client, and the
+ * audit and tool results of calls made through it, are redacted with it.
  */
 export class GoogleClient implements UpstreamClient {
   readonly redactor: SecretRedactor;
-  private readonly apiKey?: string;
-  readonly baseUrl?: string;
+  private readonly clientId?: string;
+  private readonly clientSecret?: string;
+  private refreshToken?: string;
+  private readonly onRefreshToken?: (refreshToken: string) => void | Promise<void>;
+  private access?: { token: string; expiresAt: number };
+  grantedScopes?: readonly string[];
+  private readonly retired: string[] = [];
+  private pendingToken?: Promise<string>;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
@@ -147,19 +250,18 @@ export class GoogleClient implements UpstreamClient {
   private readonly retryBudgetMs: number;
   private readonly semaphore: Semaphore;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => number;
 
   constructor(options: GoogleClientOptions = {}) {
     const credentialEnv = options.credentialEnv ?? process.env;
-    this.apiKey = options.apiKey ?? readEnvString('GOOGLE_WORKSPACE_API_KEY', credentialEnv);
-    this.redactor = new SecretRedactor().addHeader(API_KEY_HEADER).addSecret(this.apiKey);
-    const baseUrl = options.baseUrl ?? readEnvString('GOOGLE_WORKSPACE_BASE_URL', credentialEnv);
-    if (baseUrl !== undefined) {
-      this.baseUrl = trimTrailingSlash(baseUrl);
-      assertSafeBaseUrl(
-        this.baseUrl,
-        options.allowCustomBaseUrl ?? readEnvBoolean('GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL', false),
-      );
-    }
+    this.clientId = options.clientId ?? readEnvString('GOOGLE_WORKSPACE_CLIENT_ID', credentialEnv);
+    this.clientSecret = options.clientSecret ?? readEnvString('GOOGLE_WORKSPACE_CLIENT_SECRET', credentialEnv);
+    this.refreshToken = options.refreshToken ?? readEnvString('GOOGLE_WORKSPACE_REFRESH_TOKEN', credentialEnv);
+    this.onRefreshToken = options.onRefreshToken;
+    this.redactor = new SecretRedactor()
+      .addHeader(API_KEY_HEADER)
+      .addSecret(this.clientSecret)
+      .addSecret(this.refreshToken);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = intOption('timeoutMs', options.timeoutMs, 'GOOGLE_WORKSPACE_TIMEOUT_MS', 30_000, 1, MAX_TIMER_MS);
     this.maxResponseBytes = intOption(
@@ -170,81 +272,189 @@ export class GoogleClient implements UpstreamClient {
       1,
       MAX_RESPONSE_BYTES_LIMIT,
     );
-    this.semaphore = new Semaphore(
-      intOption('maxConcurrency', options.maxConcurrency, 'GOOGLE_WORKSPACE_MAX_CONCURRENCY', 4, 1, 64),
-    );
+    this.semaphore = new Semaphore(intOption('maxConcurrency', options.maxConcurrency, 'GOOGLE_WORKSPACE_MAX_CONCURRENCY', 4, 1, 64));
     this.maxAttempts = intOption('maxAttempts', options.maxAttempts, undefined, 3, 1, 10);
     this.retryBaseDelayMs = intOption('retryBaseDelayMs', options.retryBaseDelayMs, undefined, 500, 0, 60_000);
     this.retryBudgetMs = intOption('retryBudgetMs', options.retryBudgetMs, undefined, 10_000, 0, 600_000);
     this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+    this.now = options.now ?? Date.now;
   }
 
-  async get<T>(path: string, query?: Record<string, QueryValue>): Promise<T> {
-    return this.request<T>('GET', this.buildUrl(path, query));
+  async get<T>(service: GoogleService, path: string, query?: Record<string, QueryValue>): Promise<T> {
+    return this.request<T>('GET', service, path, query);
   }
 
-  async post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T> {
-    return this.request<T>('POST', this.buildUrl(path, query), body);
+  async post<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T> {
+    return this.request<T>('POST', service, path, query, body);
   }
 
-  async patch<T>(path: string, body?: unknown): Promise<T> {
-    return this.request<T>('PATCH', this.buildUrl(path), body);
+  async patch<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T> {
+    return this.request<T>('PATCH', service, path, query, body);
   }
 
-  buildUrl(path: string, query?: Record<string, QueryValue>): string {
-    if (!this.baseUrl) {
-      throw new Error('Missing GOOGLE_WORKSPACE_BASE_URL. Set it in the MCP server environment.');
-    }
+  async put<T>(service: GoogleService, path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T> {
+    return this.request<T>('PUT', service, path, query, body);
+  }
+
+  buildUrl(service: GoogleService, path: string, query?: Record<string, QueryValue>): string {
+    if (!Object.hasOwn(SERVICES, service)) throw new Error('Unknown Google service.');
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-    const url = new URL(`${this.baseUrl}${normalizedPath}`);
-
+    const url = new URL(`${SERVICES[service]}${normalizedPath}`);
+    // An empty string is sent as an empty value (People's warm-up search); undefined and null are left out.
     for (const [key, value] of Object.entries(query ?? {})) {
-      if (value === undefined || value === null || value === '') {
-        continue;
-      }
+      if (value === undefined || value === null) continue;
       url.searchParams.set(key, String(value));
     }
-
     return url.toString();
   }
 
-  private headers(): Record<string, string> {
-    if (!this.apiKey) {
-      throw new Error('Missing GOOGLE_WORKSPACE_API_KEY. Set it in the MCP server environment.');
-    }
-    return {
-      Accept: 'application/json',
-      'User-Agent': USER_AGENT,
-      [API_KEY_HEADER]: this.apiKey,
-    };
+  /** The access token in use, renewed when it is about to expire. One renewal at a time per client. */
+  private async accessToken(): Promise<string> {
+    if (this.access && this.access.expiresAt - TOKEN_EARLY_RENEWAL_MS > this.now()) return this.access.token;
+    this.pendingToken ??= this.renewAccessToken().finally(() => {
+      this.pendingToken = undefined;
+    });
+    return this.pendingToken;
   }
 
-  private async request<T>(method: HttpMethod, url: string, body?: unknown): Promise<T> {
-    const headers = this.headers();
-    const init: RequestInit = { method, headers };
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
+  private dropAccessToken(token: string): void {
+    if (this.access?.token === token) this.access = undefined;
+  }
 
-    return this.execute(method, url, init, async response => {
+  /** POST to Google's token endpoint with grant_type=refresh_token, form-encoded. */
+  private async renewAccessToken(): Promise<string> {
+    if (!this.clientId) throw new Error('Missing GOOGLE_WORKSPACE_CLIENT_ID. Set it in the MCP server environment.');
+    if (!this.clientSecret) throw new Error('Missing GOOGLE_WORKSPACE_CLIENT_SECRET. Set it in the MCP server environment.');
+    if (!this.refreshToken) throw new Error('Missing GOOGLE_WORKSPACE_REFRESH_TOKEN. Set it in the MCP server environment.');
+    const init: RequestInit = {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: this.refreshToken,
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+      }).toString(),
+    };
+    const answer = await this.execute('POST', TOKEN_URL, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(this.redactor.redact(redirectRefusedMessage(response, method, url)));
+        throw new Error(redirectRefusedMessage(response, 'POST'));
       }
-
       if (!response.ok) {
-        // The body is the vendor's text: it is never read into an error, a result or an audit record.
+        // The body is the token service's text: never read into an error.
         await discardBody(response);
+        if (response.status === 400 || response.status === 401) throw new GoogleTokenError(response.status);
         throw new GoogleHttpError({
           status: response.status,
-          url: describeUrl(url),
+          url: describeUrl(TOKEN_URL),
           retryAfter: response.headers.get('retry-after') ?? undefined,
         });
       }
-
-      return (await readResponseBody(response, this.maxResponseBytes)) as T;
+      return readResponseBody(response, this.maxResponseBytes);
     });
+    const value = answer && typeof answer === 'object' && !Array.isArray(answer) ? (answer as Record<string, unknown>) : {};
+    const token = value.access_token;
+    if (typeof token !== 'string' || !TOKEN_TEXT.test(token)) {
+      throw new Error('Google answered the token request without an access token. Nothing in the answer was used.');
+    }
+    if (value.token_type !== undefined && (typeof value.token_type !== 'string' || value.token_type.toLowerCase() !== 'bearer')) {
+      throw new Error('Google answered the token request with another token type than Bearer. Nothing in the answer was used.');
+    }
+    const expiresIn =
+      typeof value.expires_in === 'number' && Number.isInteger(value.expires_in) && value.expires_in > 0 && value.expires_in <= 86_400
+        ? value.expires_in
+        : 3_600;
+    if (typeof value.scope === 'string') {
+      // Granular consent: the account may have left some scopes out. Only scope names of ours are kept.
+      this.grantedScopes = value.scope
+        .split(/\s+/)
+        .map(scope => (scope === EMAIL_SCOPE_URL ? SCOPES.email : scope))
+        .filter(scope => ALL_SCOPES.includes(scope));
+    }
+    // Earlier access tokens stay redacted for two renewals; older ones have expired and are let go.
+    const previous = this.access?.token;
+    this.redactor.addSecret(token);
+    if (previous && previous !== token) {
+      this.retired.push(previous);
+      while (this.retired.length > 2) this.redactor.removeSecret(this.retired.shift() as string);
+    }
+    this.access = { token, expiresAt: this.now() + expiresIn * 1000 };
+    const rotated = value.refresh_token;
+    if (typeof rotated === 'string' && TOKEN_TEXT.test(rotated) && rotated !== this.refreshToken) {
+      this.redactor.addSecret(rotated);
+      this.refreshToken = rotated;
+      try {
+        const stored: unknown = this.onRefreshToken?.(rotated);
+        // A rejected promise from the host must not become an unhandled rejection.
+        if (stored && typeof (stored as Promise<void>).then === 'function') {
+          (stored as Promise<void>).then(undefined, () => undefined);
+        }
+      } catch {
+        // A host's callback failing does not fail the call; the token is in use in memory.
+      }
+    }
+    return token;
+  }
+
+  private async request<T>(
+    method: HttpMethod,
+    service: GoogleService,
+    path: string,
+    query?: Record<string, QueryValue>,
+    body?: unknown,
+  ): Promise<T> {
+    const url = this.buildUrl(service, path, query);
+    if (method !== 'GET') {
+      // The fixed list of writes: anything else is refused before any token is put in a header.
+      const sent = new URL(url).pathname.slice(new URL(`${SERVICES[service]}/`).pathname.length - 1);
+      if (!ALLOWED_WRITES.some(entry => entry.service === service && entry.method === method && entry.path.test(sent))) {
+        throw new Error(`Refused: ${method} to that Google path is not among the writes this server sends.`);
+      }
+    }
+    // A 401 means the access token was not accepted and nothing was done: renew it once and send again.
+    for (let attempt = 1; ; attempt += 1) {
+      const token = await this.accessToken();
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        'User-Agent': USER_AGENT,
+        [API_KEY_HEADER]: `Bearer ${token}`,
+      };
+      const init: RequestInit = { method, headers };
+      if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
+      }
+      const result = await this.execute(method, url, init, async response => {
+        if (isRedirect(response.status)) {
+          await discardBody(response);
+          throw new Error(this.redactor.redact(redirectRefusedMessage(response, method)));
+        }
+        if (response.status === 401 && attempt === 1) {
+          await discardBody(response);
+          return { unauthorised: true as const };
+        }
+        if (!response.ok) {
+          // The body is Google's text: it is never read into an error, a result or an audit record.
+          await discardBody(response);
+          throw new GoogleHttpError({
+            status: response.status,
+            url: describeUrl(url),
+            retryAfter: response.headers.get('retry-after') ?? undefined,
+          });
+        }
+        return { body: (await readResponseBody(response, this.maxResponseBytes)) as T };
+      });
+      if ('unauthorised' in result) {
+        this.dropAccessToken(token);
+        continue;
+      }
+      return result.body;
+    }
   }
 
   /**
@@ -274,7 +484,7 @@ export class GoogleClient implements UpstreamClient {
         } catch (error) {
           delayMs = canRetry && isTransientNetworkError(error) ? this.retryDelay(attempt, undefined, slept) : undefined;
           if (delayMs === undefined) {
-            throw this.transportError(method, url, error);
+            throw this.transportError(method, error);
           }
         }
 
@@ -288,14 +498,14 @@ export class GoogleClient implements UpstreamClient {
             } catch (error) {
               // Failures while reading the body surface as raw fetch errors.
               if (isTimeoutError(error)) {
-                throw this.transportError(method, url, error);
+                throw this.transportError(method, error);
               }
               if (!isTransientNetworkError(error)) {
                 throw error;
               }
               delayMs = canRetry ? this.retryDelay(attempt, undefined, slept) : undefined;
               if (delayMs === undefined) {
-                throw this.transportError(method, url, error);
+                throw this.transportError(method, error);
               }
             }
           }
@@ -322,8 +532,8 @@ export class GoogleClient implements UpstreamClient {
     return slept + delay > this.retryBudgetMs ? undefined : delay;
   }
 
-  // Our own words with the method only: the address is configuration and is not quoted.
-  private transportError(method: HttpMethod, _url: string, error: unknown): Error {
+  // Our own words with the method only: the address is not quoted.
+  private transportError(method: HttpMethod, error: unknown): Error {
     if (isTimeoutError(error)) {
       return new Error(this.redactor.redact(`Google API request timed out after ${this.timeoutMs} ms (${method}).`));
     }
@@ -385,12 +595,9 @@ function isRedirect(status: number): boolean {
   return status >= 300 && status < 400;
 }
 
-/** The redirect's Location is the vendor's text and is never quoted; only the status and our own request. */
-function redirectRefusedMessage(response: Response, method: HttpMethod, _url: string): string {
-  return (
-    `Google API responded with a redirect (HTTP ${response.status}) for ${method}; ` +
-    'redirects are not followed. Check GOOGLE_WORKSPACE_BASE_URL.'
-  );
+/** The redirect's Location is Google's text and is never quoted; only the status and our own request. */
+function redirectRefusedMessage(response: Response, method: HttpMethod): string {
+  return `Google API responded with a redirect (HTTP ${response.status}) for ${method}; redirects are not followed.`;
 }
 
 function isTimeoutError(error: unknown): boolean {
@@ -499,55 +706,4 @@ async function readResponseBody(response: Response, maxBytes: number): Promise<u
   } catch {
     return text;
   }
-}
-
-function trimTrailingSlash(value: string): string {
-  let end = value.length;
-  while (end > 0 && value[end - 1] === '/') {
-    end -= 1;
-  }
-  return value.slice(0, end);
-}
-
-function assertSafeBaseUrl(baseUrl: string, allowCustomHost: boolean): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(baseUrl);
-  } catch {
-    throw new ConfigError('GOOGLE_WORKSPACE_BASE_URL is not a valid URL.');
-  }
-
-  if (parsed.username || parsed.password || baseUrl.includes('?') || baseUrl.includes('#')) {
-    throw new ConfigError('GOOGLE_WORKSPACE_BASE_URL must not contain credentials, a query string or a fragment.');
-  }
-
-  if (isLocalHost(parsed.hostname) && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
-    return;
-  }
-
-  if (parsed.protocol !== 'https:') {
-    throw new ConfigError(
-      // The scheme is not quoted: it is part of a configuration value.
-      'Refusing to send the API key over a scheme other than https://. Use https:// (loopback http:// is allowed for local mocks).',
-    );
-  }
-
-  const host = parsed.hostname.toLowerCase();
-  if (
-    UPSTREAM_HOST_SUFFIXES.length === 0 ||
-    allowCustomHost ||
-    UPSTREAM_HOST_SUFFIXES.some(suffix => host === suffix || host.endsWith(`.${suffix}`))
-  ) {
-    return;
-  }
-
-  // The host is not quoted: it is a configuration value.
-  throw new ConfigError(
-    `Refusing to send the API key to that host: GOOGLE_WORKSPACE_BASE_URL must be on ${UPSTREAM_HOST_SUFFIXES.join(', ')}. ` +
-      'Set GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL=true to allow another host.',
-  );
-}
-
-function isLocalHost(hostname: string): boolean {
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
 }

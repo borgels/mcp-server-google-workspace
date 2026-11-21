@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { API_KEY_HEADER } from '../src/google/client.js';
 import { createGoogleGateway } from '../src/gateway.js';
-import { BASE, stubFetch, texts } from './helpers.js';
+import { APP, DEFAULT_TASKS, EVENTS, TOKEN_URL, apiCalls, stubFetch, texts, tokenAnswer, withToken } from './helpers.js';
 
 // Every gateway call runs in a call scope of its own: its policy (or the environment), its sink and its
 // redactor, also when it is made from inside another instance's call, and also across await.
@@ -30,8 +29,8 @@ const LONG_KEY = `long-${'k'.repeat(250)}`;
 
 function routes() {
   return stubFetch({
-    [`GET ${BASE}/items/i1`]: { body: { id: 'i1' } },
-    [`POST ${BASE}/items`]: { body: { id: 'new' } },
+    [`GET ${EVENTS}/i1`]: { body: { id: 'i1' } },
+    [`POST ${DEFAULT_TASKS}`]: { body: { id: 'new' } },
   });
 }
 
@@ -49,11 +48,13 @@ function heldFetch() {
     signalStarted = resolve;
   });
   const keys: string[] = [];
-  const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
-    keys.push(String((init?.headers as Record<string, string> | undefined)?.[API_KEY_HEADER] ?? ''));
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (!String(input).startsWith(TOKEN_URL)) return json({ id: 'i1' });
+    // The refresh token the instance sent to Google's token endpoint.
+    keys.push(new URLSearchParams(String(init?.body ?? '')).get('refresh_token') ?? '');
     signalStarted();
     await gate;
-    return json({ id: 'i1' });
+    return json(tokenAnswer());
   }) as unknown as typeof fetch;
   return { fetchImpl, release, started, keys };
 }
@@ -61,26 +62,26 @@ function heldFetch() {
 describe('audit records', () => {
   it('are never written with a key the redactor cannot protect: a short key is refused', () => {
     for (const apiKey of ['abc123', 'k', '1234567', '123456789012345']) {
-      expect(() => createGoogleGateway({ apiKey, baseUrl: BASE, policy: {} }), apiKey).toThrow(/key was refused/);
-      expect(() => createGoogleGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/key was refused/);
+      expect(() => createGoogleGateway({ ...APP, refreshToken: apiKey, policy: {} }), apiKey).toThrow(/key was refused/);
+      expect(() => createGoogleGateway({ ...APP, refreshToken: apiKey }), apiKey).toThrow(/key was refused/);
     }
-    expect(() => createGoogleGateway({ apiKey: '1234567890123456', baseUrl: BASE, policy: {} })).not.toThrow();
+    expect(() => createGoogleGateway({ ...APP, refreshToken: '1234567890123456', policy: {} })).not.toThrow();
   });
 
   it('keep the instance key out, refusals, input and metadata included', async () => {
     const records: AuditRecord[] = [];
     const gw = createGoogleGateway({
-      apiKey: LONG_KEY,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: LONG_KEY,
       fetchImpl: routes() as unknown as typeof fetch,
       policy: { audit: record => void records.push(record) },
     });
     const metadata = { caller: `person ${LONG_KEY}`, requestId: LONG_KEY };
     await gw.callTool(LONG_KEY, {}, metadata);
-    await gw.callTool(`get_${LONG_KEY}`, { itemId: 'i1' }, metadata);
-    await gw.callTool('get_item', { [LONG_KEY]: 'x', itemId: 'i1' }, metadata);
-    await gw.callTool('get_item', { itemId: LONG_KEY }, metadata);
-    await gw.callTool('create_item', { name: LONG_KEY, description: LONG_KEY }, metadata);
+    await gw.callTool(`get_${LONG_KEY}`, { eventId: 'i1' }, metadata);
+    await gw.callTool('get_event', { [LONG_KEY]: 'x', eventId: 'i1' }, metadata);
+    await gw.callTool('get_event', { eventId: LONG_KEY }, metadata);
+    await gw.callTool('create_task', { title: LONG_KEY }, metadata);
 
     expect(records.length).toBeGreaterThanOrEqual(5);
     const text = JSON.stringify(records);
@@ -96,24 +97,24 @@ describe('call scopes', () => {
     const held = heldFetch();
     const sinkA: AuditRecord[] = [];
     const sinkB: AuditRecord[] = [];
-    const a = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: held.fetchImpl, policy: { audit: r => void sinkA.push(r) } });
+    const a = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: held.fetchImpl, policy: { audit: r => void sinkA.push(r) } });
     const b = createGoogleGateway({
-      apiKey: KEY_B,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: KEY_B,
       fetchImpl: routes() as unknown as typeof fetch,
       policy: { enableWrites: true, audit: r => void sinkB.push(r) },
     });
 
     // A starts and waits inside its upstream request; B runs a read and a write meanwhile; then A resumes.
-    const pendingA = a.callTool('get_item', { itemId: 'i1' }, { requestId: 'a' });
+    const pendingA = a.callTool('get_event', { eventId: 'i1' }, { requestId: 'a' });
     await held.started;
     expect(held.keys).toEqual([KEY_A]);
-    expect((await b.callTool('get_item', { itemId: 'i1' }, { requestId: 'b1' })).isError).toBeUndefined();
-    expect((await b.callTool('create_item', { name: 'n' }, { requestId: 'b2' })).isError).toBeUndefined();
+    expect((await b.callTool('get_event', { eventId: 'i1' }, { requestId: 'b1' })).isError).toBeUndefined();
+    expect((await b.callTool('create_task', { title: 'n' }, { requestId: 'b2' })).isError).toBeUndefined();
     held.release();
     expect((await pendingA).isError).toBeUndefined();
     // After resuming, A still cannot write: its own policy, not B's.
-    expect((await a.callTool('create_item', { name: 'n' }, { requestId: 'a2' })).isError).toBe(true);
+    expect((await a.callTool('create_task', { title: 'n' }, { requestId: 'a2' })).isError).toBe(true);
 
     expect(sinkA.filter(r => r.requestId === 'a').map(r => r.action)).toEqual(['start', 'finish']);
     expect(new Set(sinkA.map(r => r.requestId))).toEqual(new Set(['a', 'a2']));
@@ -125,23 +126,23 @@ describe('call scopes', () => {
     // allows no writes) tries a write: refused, nothing sent, and nothing of B's in A's sink.
     const sinkA: AuditRecord[] = [];
     const fetchB = routes();
-    const b = createGoogleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: fetchB as unknown as typeof fetch });
+    const b = createGoogleGateway({ ...APP, refreshToken: KEY_B, fetchImpl: fetchB as unknown as typeof fetch });
     const nested: Array<Promise<{ isError?: boolean; content: Array<{ text: string }> }>> = [];
     const a = createGoogleGateway({
-      apiKey: KEY_A,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: KEY_A,
       fetchImpl: routes() as unknown as typeof fetch,
       policy: {
         enableWrites: true,
         audit: record => {
           sinkA.push(record);
           if (record.action === 'start' && nested.length === 0) {
-            nested.push(b.callTool('create_item', { name: 'n' }, { requestId: 'b' }));
+            nested.push(b.callTool('create_task', { title: 'n' }, { requestId: 'b' }));
           }
         },
       },
     });
-    expect((await a.callTool('create_item', { name: 'n' }, { requestId: 'a' })).isError).toBeUndefined();
+    expect((await a.callTool('create_task', { title: 'n' }, { requestId: 'a' })).isError).toBeUndefined();
     const fromInside = await nested[0]!;
     expect(fromInside.isError).toBe(true);
     expect(texts(fromInside).join(' ')).toMatch(/GOOGLE_WORKSPACE_ENABLE_WRITES/);
@@ -154,14 +155,14 @@ describe('call scopes', () => {
     // policy without writes) tries a write: refused. After B returns, A's own write still goes through.
     process.env.GOOGLE_WORKSPACE_ENABLE_WRITES = 'true';
     const fetchB = routes();
-    const b = createGoogleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: fetchB as unknown as typeof fetch, policy: {} });
+    const b = createGoogleGateway({ ...APP, refreshToken: KEY_B, fetchImpl: fetchB as unknown as typeof fetch, policy: {} });
     let fromInside: { isError?: boolean } | undefined;
-    const fetchA = (async () => {
-      fromInside = await b.callTool('create_item', { name: 'n' });
+    const fetchA = withToken((async () => {
+      fromInside = await b.callTool('create_task', { title: 'n' });
       return json({ id: 'new' });
-    }) as unknown as typeof fetch;
-    const a = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchA });
-    expect((await a.callTool('create_item', { name: 'n' })).isError).toBeUndefined();
+    }) as unknown as typeof fetch);
+    const a = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: fetchA });
+    expect((await a.callTool('create_task', { title: 'n' })).isError).toBeUndefined();
     expect(fromInside?.isError).toBe(true);
     expect(fetchB).not.toHaveBeenCalled();
   });
@@ -173,19 +174,19 @@ describe('call scopes', () => {
     const created: Array<{ where: string; error: unknown }> = [];
     const tryCreate = (where: string) => {
       try {
-        createGoogleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: routes() as unknown as typeof fetch });
+        createGoogleGateway({ ...APP, refreshToken: KEY_B, fetchImpl: routes() as unknown as typeof fetch });
         created.push({ where, error: undefined });
       } catch (error) {
         created.push({ where, error });
       }
     };
-    const fetchA = (async () => {
+    const fetchA = withToken((async () => {
       tryCreate('fetch');
       return json({ id: 'i1' });
-    }) as unknown as typeof fetch;
+    }) as unknown as typeof fetch);
     const a = createGoogleGateway({
-      apiKey: KEY_A,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: KEY_A,
       fetchImpl: fetchA,
       policy: {
         audit: record => {
@@ -193,7 +194,7 @@ describe('call scopes', () => {
         },
       },
     });
-    expect((await a.callTool('get_item', { itemId: 'i1' })).isError).toBeUndefined();
+    expect((await a.callTool('get_event', { eventId: 'i1' })).isError).toBeUndefined();
     expect(created.map(c => c.where).sort()).toEqual(['fetch', 'sink']);
     for (const c of created) {
       expect(String(c.error), c.where).toMatch(/GOOGLE_WORKSPACE_DISABLED_TOOLS names 1 unknown tool/);
@@ -203,8 +204,8 @@ describe('call scopes', () => {
   it('never send a write upstream when the start record is refused', async () => {
     const fetchImpl = routes();
     const gw = createGoogleGateway({
-      apiKey: KEY_A,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: KEY_A,
       fetchImpl: fetchImpl as unknown as typeof fetch,
       policy: {
         enableWrites: true,
@@ -213,21 +214,21 @@ describe('call scopes', () => {
         },
       },
     });
-    expect((await gw.callTool('get_item', { itemId: 'i1' })).isError).toBeUndefined();
-    const write = await gw.callTool('create_item', { name: 'n' });
+    expect((await gw.callTool('get_event', { eventId: 'i1' })).isError).toBeUndefined();
+    const write = await gw.callTool('create_task', { title: 'n' });
     expect(write.isError).toBe(true);
-    expect(fetchImpl.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toEqual([]);
+    expect(apiCalls(fetchImpl).filter(call => call.method === 'POST')).toEqual([]);
   });
 
   it('name the host, not an environment variable, when a host policy refuses', async () => {
     const gw = createGoogleGateway({
-      apiKey: KEY_A,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: KEY_A,
       fetchImpl: routes() as unknown as typeof fetch,
-      policy: { disabledTools: ['get_item'] },
+      policy: { disabledTools: ['get_event'] },
     });
-    const disabled = texts(await gw.callTool('get_item', { itemId: 'i1' })).join(' ');
-    const write = texts(await gw.callTool('create_item', { name: 'n' })).join(' ');
+    const disabled = texts(await gw.callTool('get_event', { eventId: 'i1' })).join(' ');
+    const write = texts(await gw.callTool('create_task', { title: 'n' })).join(' ');
     for (const text of [disabled, write]) {
       expect(text).not.toMatch(/GOOGLE_WORKSPACE_/);
       expect(text).toMatch(/host/);
