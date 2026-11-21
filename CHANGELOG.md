@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- `google_create_event` and `google_update_event` take a time in the form the
+  description shows: `2026-11-22T10:00` with `timeZone` (or with an offset,
+  `2026-11-22T10:00+01:00`). Seconds are added before the time is sent, since
+  the Calendar API refuses a time without them; `timeZone` is sent along as
+  before. A whole-day event whose end is its start day is that one day (the
+  end is sent as the day after).
+- `google_create_spreadsheet` answers with `firstSheet`, the name of the first
+  sheet. Google names a new sheet in the account's language (`Sheet1`, `Ark1`,
+  ...), and the range examples no longer assume `Sheet1`.
+
 ## 0.4.1
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,

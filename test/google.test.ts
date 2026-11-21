@@ -1,9 +1,9 @@
 // Contract tests: every tool against answers shaped as Google's API reference documents them, and the requests
 // each tool sends (method, address, query and body).
 import { describe, expect, it } from 'vitest';
-import type { GatewayJsonObject } from '../src/gateway.js';
+import { googleGatewayTools, type GatewayJsonObject } from '../src/gateway.js';
 import { ALL_SCOPES, SCOPES } from '../src/google/client.js';
-import { fileIdFrom } from '../src/google/values.js';
+import { fileIdFrom, nextDay, withSeconds } from '../src/google/values.js';
 import {
   APP,
   CAL,
@@ -150,13 +150,26 @@ describe('calendar', () => {
     expect(query(timed.calls[0]!.url)).toEqual({ sendUpdates: 'none' });
     expect(timed.calls[0]!.body).toEqual({
       summary: 'Byggemøde',
-      start: { dateTime: '2026-11-24T09:00', timeZone: 'Europe/Copenhagen' },
-      end: { dateTime: '2026-11-24T10:00', timeZone: 'Europe/Copenhagen' },
+      start: { dateTime: '2026-11-24T09:00:00', timeZone: 'Europe/Copenhagen' },
+      end: { dateTime: '2026-11-24T10:00:00', timeZone: 'Europe/Copenhagen' },
       attendees: [{ email: 'bo@example.dk' }],
+    });
+
+    const offset = await call(routes, 'create_event', { summary: 'Møde', start: '2026-11-22T10:00+01:00', end: '2026-11-22T11:00:00+01:00' });
+    expect(offset.result.isError, offset.result.content[0]?.text).toBeUndefined();
+    expect(offset.calls[0]!.body).toEqual({
+      summary: 'Møde',
+      start: { dateTime: '2026-11-22T10:00:00+01:00' },
+      end: { dateTime: '2026-11-22T11:00:00+01:00' },
     });
 
     const allDay = await call(routes, 'create_event', { summary: 'Ferie', start: '2026-12-21', end: '2026-12-24' });
     expect(allDay.calls[0]!.body).toEqual({ summary: 'Ferie', start: { date: '2026-12-21' }, end: { date: '2026-12-24' } });
+
+    // A whole day that ends on its start day is that one day; Google wants the day after as its end.
+    const oneDay = await call(routes, 'create_event', { summary: 'Nytår', start: '2026-12-31', end: '2026-12-31', timeZone: 'Europe/Copenhagen' });
+    expect(oneDay.result.isError, oneDay.result.content[0]?.text).toBeUndefined();
+    expect(oneDay.calls[0]!.body).toEqual({ summary: 'Nytår', start: { date: '2026-12-31' }, end: { date: '2027-01-01' } });
 
     for (const input of [
       { summary: 'x', start: '2026-11-24T09:00', end: '2026-11-24T10:00' },
@@ -182,6 +195,29 @@ describe('calendar', () => {
     expect(calls[1]!.body).toEqual({ summary: 'Byggemøde (flyttet)', location: 'Kontoret' });
     expect(data.before).toEqual({ summary: 'Byggemøde', location: 'Testvej 1, 8000 Aarhus C' });
     expect((data.event as Record<string, unknown>).summary).toBe('Byggemøde (flyttet)');
+  });
+
+  it('changes the time of an event in the form the description shows', async () => {
+    const { result, calls } = await call(
+      { [`GET ${EVENTS}/abc123def456`]: { body: EVENT }, [`PATCH ${EVENTS}/abc123def456`]: { body: EVENT } },
+      'update_event',
+      { eventId: 'abc123def456', start: '2026-11-24T13:00', end: '2026-11-24T14:30', timeZone: 'Europe/Copenhagen' },
+    );
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(calls[1]!.body).toEqual({
+      start: { dateTime: '2026-11-24T13:00:00', timeZone: 'Europe/Copenhagen' },
+      end: { dateTime: '2026-11-24T14:30:00', timeZone: 'Europe/Copenhagen' },
+    });
+  });
+
+  it('adds seconds only where they are missing', () => {
+    expect(withSeconds('2026-11-22T10:00')).toBe('2026-11-22T10:00:00');
+    expect(withSeconds('2026-11-22T10:00Z')).toBe('2026-11-22T10:00:00Z');
+    expect(withSeconds('2026-11-22T10:00-05:00')).toBe('2026-11-22T10:00:00-05:00');
+    expect(withSeconds('2026-11-22T10:00:30')).toBe('2026-11-22T10:00:30');
+    expect(withSeconds('2026-11-22T10:00:30.5+01:00')).toBe('2026-11-22T10:00:30.5+01:00');
+    expect(nextDay('2026-02-28')).toBe('2026-03-01');
+    expect(nextDay('2028-02-28')).toBe('2028-02-29');
   });
 
   it('refuses a change with no fields, without sending anything', async () => {
@@ -283,7 +319,33 @@ describe('sheets', () => {
       { title: 'Budget', sheetTitles: ['Indtægter'] },
     );
     expect(calls[0]!.body).toEqual({ properties: { title: 'Budget' }, sheets: [{ properties: { title: 'Indtægter' } }] });
-    expect(data).toEqual({ spreadsheetId: SHEET_ID, title: 'Budget', url: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`, sheets: ['Indtægter'] });
+    expect(data).toEqual({
+      spreadsheetId: SHEET_ID,
+      title: 'Budget',
+      url: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`,
+      firstSheet: 'Indtægter',
+      sheets: ['Indtægter'],
+    });
+  });
+
+  it("names the first sheet as Google named it in the account's language", async () => {
+    const { data, calls } = await call(
+      {
+        [`POST ${SHEETS}/spreadsheets`]: {
+          body: { spreadsheetId: SHEET_ID, properties: { title: 'Budget', locale: 'da_DK' }, sheets: [{ properties: { sheetId: 0, title: 'Ark1' } }], spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit` },
+        },
+      },
+      'create_spreadsheet',
+      { title: 'Budget' },
+    );
+    expect(calls[0]!.body).toEqual({ properties: { title: 'Budget' } });
+    expect(data.firstSheet).toBe('Ark1');
+    expect(data.sheets).toEqual(['Ark1']);
+  });
+
+  it('never gives Sheet1 as the example of a range', () => {
+    expect(JSON.stringify(googleGatewayTools)).not.toMatch(/Sheet1!/);
+    expect(JSON.stringify(googleGatewayTools)).toMatch(/get_spreadsheet or create_spreadsheet/);
   });
 
   it('refuses a link to another host, a range with a slash and too many cells', async () => {

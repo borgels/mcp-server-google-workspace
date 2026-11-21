@@ -25,7 +25,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for Google Wo
 | `google_read_range` | Values in a range (A1 notation), as shown. |
 | `google_update_range` *(write)* | Write values into a range (`RAW`). |
 | `google_append_rows` *(write)* | Add rows after a table (`RAW`). |
-| `google_create_spreadsheet` *(write)* | Create an empty spreadsheet, shared with no one. |
+| `google_create_spreadsheet` *(write)* | Create an empty spreadsheet, shared with no one. The answer names its first sheet (`firstSheet`), which Google names in the account's language. |
 | `google_get_document` | The text of a document, tables included. |
 | `google_append_text` *(write)* | Add text at the end of a document. |
 | `google_create_document` *(write)* | Create a document, shared with no one. |
