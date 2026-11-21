@@ -17,7 +17,8 @@ First version, from the MCP server template with its embedding surface (`./gatew
 - Answers are cut down to the fields a person reads; nothing else from Google is passed on.
 - A contact change sends the contact source with its version, as Google requires, and keeps every part of the name
   and the organization that is not given, the other names and organizations, and the labels on kept addresses and
-  numbers; the values before are answered whole. A search sends Google's warm-up request first.
+  numbers; only the contact's own data is read before a change (`READ_SOURCE_TYPE_CONTACT`), never the Google
+  profile's; the values before are answered whole. A search sends Google's warm-up request first.
 - A new access token or rotated refresh token from Google passes the same key admission as the host's secrets
   (no piece shared with the fixed texts, fallbacks or tool list); one that does not is never used.
 - A range that holds formulas is not overwritten; the values before a change are read with formulas.

@@ -124,7 +124,7 @@ export function eventBody(fields: EventFields): Json {
 
 export async function createEvent(client: UpstreamClient, input: EventFields & { calendarId?: string }): Promise<unknown> {
   const calendarId = calendarPath(input.calendarId ?? 'primary');
-  // No mail to the attendees: sendUpdates=none. The event is in their calendars as Google shows shared events.
+  // sendUpdates=none: Google sends the attendees no invitation or update (Google notes a few mails may still go out).
   const created = await client.post('calendar', `/calendars/${calendarId}/events`, eventBody(input), { sendUpdates: 'none' });
   return shapeEvent(created);
 }

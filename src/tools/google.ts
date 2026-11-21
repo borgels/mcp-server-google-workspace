@@ -183,7 +183,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'google_create_event',
     title: 'Create event (Google Workspace)',
-    description: 'Create an event in a calendar. Attendees are added without any mail being sent.',
+    description: 'Create an event in a calendar. Sent with sendUpdates=none, so Google sends attendees no invitation.',
     inputShape: {
       ...eventFieldShape,
       calendarId: optionalCalendar,

@@ -449,7 +449,7 @@ describe('contacts', () => {
       'update_contact',
       { contact: `people/${id}`, phones: ['+45 87 65 43 21'] },
     );
-    expect(query(calls[0]!.url)).toEqual({ personFields: 'names,emailAddresses,phoneNumbers,organizations,metadata' });
+    expect(query(calls[0]!.url)).toEqual({ personFields: 'names,emailAddresses,phoneNumbers,organizations,metadata', sources: 'READ_SOURCE_TYPE_CONTACT' });
     expect(query(calls[1]!.url)).toEqual({ updatePersonFields: 'phoneNumbers', personFields: 'names,emailAddresses,phoneNumbers,organizations' });
     expect(calls[1]!.body).toEqual({
       phoneNumbers: [{ value: '+45 87 65 43 21' }],
@@ -515,6 +515,29 @@ describe('contacts', () => {
       { value: '+45 12 34 56 78', type: 'work' },
       { value: '+45 87 65 43 21' },
     ]);
+  });
+
+  it('sends back only the own names and organizations of the contact, never those of the Google profile', async () => {
+    const id = 'c7142250453257580122';
+    const merged = {
+      ...PERSON,
+      names: [
+        { metadata: { primary: true, source: { type: 'PROFILE', id: 'p1' } }, givenName: 'Anna', familyName: 'Profil' },
+        { metadata: { source: { type: 'CONTACT', id: '6301234567890abc' } }, givenName: 'Anna', familyName: 'Jensen' },
+      ],
+      organizations: [
+        { metadata: { source: { type: 'PROFILE', id: 'p1' } }, name: 'Profilfirma A/S' },
+        { metadata: { source: { type: 'CONTACT', id: '6301234567890abc' } }, name: 'Demo Byg ApS', title: 'Projektleder' },
+      ],
+    };
+    const routes = {
+      [`GET ${PEOPLE}/people/${id}`]: { body: merged },
+      [`PATCH ${PEOPLE}/people/${id}:updateContact`]: { body: PERSON },
+    };
+    const name = await call(routes, 'update_contact', { contact: id, givenName: 'Anne' });
+    expect((name.calls[1]!.body as Record<string, unknown>).names).toEqual([{ givenName: 'Anne', familyName: 'Jensen' }]);
+    const title = await call(routes, 'update_contact', { contact: id, organization: { title: 'Formand' } });
+    expect((title.calls[1]!.body as Record<string, unknown>).organizations).toEqual([{ name: 'Demo Byg ApS', title: 'Formand' }]);
   });
 
   it('changes nothing when Google gives no contact source with its version', async () => {

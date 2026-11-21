@@ -110,12 +110,19 @@ interface Current {
   phoneNumbers: Json[];
 }
 
+/** Whether a field entry is the contact's own: its source is the contact (or not given), never a profile. */
+function contactOwn(entry: unknown): boolean {
+  const type = obj(obj(obj(entry).metadata).source).type;
+  return type === undefined || type === 'CONTACT';
+}
+
 function currentOf(person: Json): Current {
+  const own = (field: unknown) => arr(field).filter(contactOwn);
   return {
-    names: arr(person.names).map(n => writable(n, NAME_FIELDS)),
-    organizations: arr(person.organizations).map(o => writable(o, ORGANIZATION_FIELDS)),
-    emailAddresses: arr(person.emailAddresses).map(e => writable(e, ENTRY_FIELDS)),
-    phoneNumbers: arr(person.phoneNumbers).map(e => writable(e, ENTRY_FIELDS)),
+    names: own(person.names).map(n => writable(n, NAME_FIELDS)),
+    organizations: own(person.organizations).map(o => writable(o, ORGANIZATION_FIELDS)),
+    emailAddresses: own(person.emailAddresses).map(e => writable(e, ENTRY_FIELDS)),
+    phoneNumbers: own(person.phoneNumbers).map(e => writable(e, ENTRY_FIELDS)),
   };
 }
 
@@ -181,7 +188,11 @@ export async function updateContact(client: UpstreamClient, input: ContactFields
   const path = `/people/${encodePathParam(contactId(input.contact), 'contact')}`;
   // The contact as it is: its etag and its contact source with that source's etag (updateContact requires both and
   // refuses a change to a version that is no longer the newest), and the fields, so the change can be undone.
-  const current = obj(await client.get('people', path, { personFields: `${PERSON_FIELDS},metadata` }));
+  // Only the contact's own data (READ_SOURCE_TYPE_CONTACT): the default also merges in the person's Google profile,
+  // and a profile name or company sent back would become contact data, or a second name Google refuses.
+  const current = obj(
+    await client.get('people', path, { personFields: `${PERSON_FIELDS},metadata`, sources: 'READ_SOURCE_TYPE_CONTACT' }),
+  );
   const sources = arr(obj(current.metadata).sources)
     .map(obj)
     .filter(source => source.type === 'CONTACT' && typeof source.id === 'string' && typeof source.etag === 'string')
