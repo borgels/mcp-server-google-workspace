@@ -1,5 +1,5 @@
 import { ConfigError, readEnvInteger, readEnvString, type Env } from '../config-env.js';
-import { GoogleHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
+import { GoogleHttpError, describeUrl, parseRetryAfterMs, requestIdFrom, SecretRedactor, vendorRequestId } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface GoogleClientOptions {
@@ -208,16 +208,19 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
   };
 }
 
-/** The token endpoint refused the app's access: our own text, nothing of the answer. */
+/** The token endpoint refused the app's access: our own text, nothing of the answer but its status and request id. */
 export class GoogleTokenError extends Error {
   readonly status: number;
-  constructor(status: number) {
+  /** The vendor's own id for the request, when a response header gives one as a UUID or hex id. */
+  readonly requestId?: string;
+  constructor(status: number, requestId?: string) {
     super(
       `Google refused the access (HTTP ${status}). It may have been withdrawn or have expired; ` +
         'the account gives the app access again.',
     );
     this.name = 'GoogleTokenError';
     this.status = status;
+    this.requestId = vendorRequestId(requestId);
   }
 }
 
@@ -356,11 +359,14 @@ export class GoogleClient implements UpstreamClient {
       if (!response.ok) {
         // The body is the token service's text: never read into an error.
         await discardBody(response);
-        if (response.status === 400 || response.status === 401) throw new GoogleTokenError(response.status);
+        if (response.status === 400 || response.status === 401) {
+          throw new GoogleTokenError(response.status, requestIdFrom(response.headers));
+        }
         throw new GoogleHttpError({
           status: response.status,
           url: describeUrl(TOKEN_URL),
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          requestId: requestIdFrom(response.headers),
         });
       }
       return readResponseBody(response, this.maxResponseBytes);
@@ -457,6 +463,7 @@ export class GoogleClient implements UpstreamClient {
             status: response.status,
             url: describeUrl(url),
             retryAfter: response.headers.get('retry-after') ?? undefined,
+            requestId: requestIdFrom(response.headers),
           });
         }
         return { body: (await readResponseBody(response, this.maxResponseBytes)) as T };
