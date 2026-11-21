@@ -1,6 +1,6 @@
 {
   "name": "@borgels/mcp-server-google-workspace",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.borgels/mcp-server-google-workspace",
   "description": "Unofficial MCP server for Google Workspace: Calendar, Sheets, Docs, Contacts and Tasks, without restricted scopes.",
   "type": "module",

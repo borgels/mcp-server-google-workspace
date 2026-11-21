@@ -302,6 +302,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "Read the range.",
   "Read-only tool ",
   "Received ",
+  "RedirectRefusedError",
   "Refused: ",
   "Refusing to listen on a non-loopback address (from MCP_HTTP_HOST or HOST) without MCP_HTTP_TOKEN: anyone who can reach this address ",
   "Request body could not be read (connection aborted)",

@@ -20,7 +20,11 @@ afterEach(() => {
 });
 
 function answer(status: number, headers: Record<string, string>, body: unknown = BODY): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  // A 304 has no body.
+  return new Response(status === 304 ? null : JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  });
 }
 
 function gatewayAnswering(status: number, headers: Record<string, string>, body?: unknown, refreshToken = REFRESH) {
@@ -108,6 +112,23 @@ describe('gateway error results', () => {
       expect(result.failure).toEqual({ httpStatus: status, requestId: UUID });
       expect(JSON.stringify(result)).not.toContain('Jane Doe');
       expect(JSON.stringify(result)).not.toContain('invalid_grant');
+    }
+  });
+
+  it('carry the status and request id of a redirect, which is not followed, from an API or the token endpoint', async () => {
+    for (const status of [301, 302, 304, 307, 308]) {
+      const headers = { location: 'https://elsewhere.example/', 'x-request-id': UUID };
+      const api = await gatewayAnswering(status, headers).callTool('get_event', { eventId: 'e1' });
+      const fetchImpl = (async (input: string | URL | Request) =>
+        String(input).startsWith(TOKEN_URL) ? answer(status, headers) : answer(200, {}, {})) as typeof fetch;
+      const token = await createGoogleGateway({ ...APP, refreshToken: REFRESH, fetchImpl, maxAttempts: 1 }).callTool('get_event', {
+        eventId: 'e1',
+      });
+      for (const result of [api, token]) {
+        expect(result.isError).toBe(true);
+        expect(result.failure).toEqual({ httpStatus: status, requestId: UUID });
+        expect(JSON.stringify(result)).not.toContain('elsewhere');
+      }
     }
   });
 

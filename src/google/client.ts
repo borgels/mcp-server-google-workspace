@@ -1,5 +1,13 @@
 import { ConfigError, readEnvInteger, readEnvString, type Env } from '../config-env.js';
-import { GoogleHttpError, describeUrl, parseRetryAfterMs, requestIdFrom, SecretRedactor, vendorRequestId } from '../errors.js';
+import {
+  GoogleHttpError,
+  describeUrl,
+  parseRetryAfterMs,
+  RedirectRefusedError,
+  requestIdFrom,
+  SecretRedactor,
+  vendorRequestId,
+} from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface GoogleClientOptions {
@@ -354,7 +362,7 @@ export class GoogleClient implements UpstreamClient {
     const answer = await this.execute('POST', TOKEN_URL, init, async response => {
       if (isRedirect(response.status)) {
         await discardBody(response);
-        throw new Error(redirectRefusedMessage(response, 'POST'));
+        throw new RedirectRefusedError(redirectRefusedMessage(response, 'POST'), response.status, requestIdFrom(response.headers));
       }
       if (!response.ok) {
         // The body is the token service's text: never read into an error.
@@ -450,7 +458,11 @@ export class GoogleClient implements UpstreamClient {
       const result = await this.execute(method, url, init, async response => {
         if (isRedirect(response.status)) {
           await discardBody(response);
-          throw new Error(this.redactor.redact(redirectRefusedMessage(response, method)));
+          throw new RedirectRefusedError(
+            this.redactor.redact(redirectRefusedMessage(response, method)),
+            response.status,
+            requestIdFrom(response.headers),
+          );
         }
         if (response.status === 401 && attempt === 1) {
           await discardBody(response);

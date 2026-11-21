@@ -275,8 +275,25 @@ export function failureFrom(status: unknown, requestId: unknown): FailureMetadat
 
 /** The failure metadata of an error: an HTTP error from the upstream API gives its status and request id. */
 export function failureMetadata(error: unknown): FailureMetadata | undefined {
-  if (!(error instanceof GoogleHttpError)) return undefined;
+  if (!(error instanceof GoogleHttpError) && !(error instanceof RedirectRefusedError)) return undefined;
   return failureFrom(error.status, error.requestId);
+}
+
+/**
+ * A redirect from the upstream API, refused (redirects are never followed). The message is our own text, as before;
+ * the status and the vendor's request id are kept for the failure metadata. Never the Location or the body.
+ */
+export class RedirectRefusedError extends Error {
+  readonly status: number;
+  /** The vendor's own id for the request, when a response header gives one as a UUID or hex id. */
+  readonly requestId?: string;
+
+  constructor(message: string, status: number, requestId?: string) {
+    super(message);
+    this.name = 'RedirectRefusedError';
+    this.status = status;
+    this.requestId = vendorRequestId(requestId);
+  }
 }
 
 /** The whole text of an HTTP error: status, our hint, and a parsed Retry-After in seconds. */
