@@ -1,6 +1,6 @@
 {
   "name": "@borgels/mcp-server-google-workspace",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "mcpName": "io.github.borgels/mcp-server-google-workspace",
   "description": "Unofficial MCP server for Google Workspace: Calendar, Sheets, Docs, Contacts and Tasks, without restricted scopes.",
   "type": "module",
@@ -16,6 +16,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "CHANGELOG.md",
     ".env.example"
   ],
@@ -47,7 +48,7 @@
     "tasks"
   ],
   "author": "",
-  "license": "Apache-2.0",
+  "license": "FSL-1.1-ALv2",
   "engines": {
     "node": ">=22"
   },
