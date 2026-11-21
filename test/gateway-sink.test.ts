@@ -1,9 +1,9 @@
 // The sink check (README, "Threat model"): nothing that leaves a gateway holds a piece of 6 characters of the key.
-// Every output is checked in its final form; the round-7 countergoogles and keys spliced from real outputs.
+// Every output is checked in its final form; the round-7 counterexamples and keys spliced from real outputs.
 import { describe, expect, it } from 'vitest';
 import { createGoogleGateway } from '../src/gateway.js';
 import { visibleTexts } from '../src/key-admission.js';
-import { BASE } from './helpers.js';
+import { APP, DEFAULT_TASKS, EVENTS, TOKEN_URL, tokenAnswer } from './helpers.js';
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -24,10 +24,11 @@ function leaked(key: string, outputs: unknown[]): string[] {
 }
 
 const upstream: typeof fetch = async input => {
-  const path = (String(input).split('?')[0] ?? '').slice(BASE.length);
-  if (path === '/items/i1') return json({ id: 'i1', name: 'Item one', status: 'open', riskLevel: 'low' });
-  if (path === '/items') return json({ id: 'i2', name: 'n' }, 201);
-  return json({ message: 'no stub' }, 404);
+  const url = String(input).split('?')[0] ?? '';
+  if (url === TOKEN_URL) return json(tokenAnswer());
+  if (url === `${EVENTS}/i1`) return json({ id: 'i1', summary: 'Event one', status: 'confirmed' });
+  if (url === DEFAULT_TASKS) return json({ id: 'i2', title: 'n' });
+  return json({ error: { message: 'no stub' } }, 404);
 };
 
 /** Every output of a normal session with this key, or the refusal when the key is not admitted. */
@@ -36,8 +37,8 @@ async function outputs(apiKey: string): Promise<{ refused?: string; outputs: unk
   let gw: ReturnType<typeof createGoogleGateway>;
   try {
     gw = createGoogleGateway({
-      apiKey,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: apiKey,
       fetchImpl: upstream,
       maxAttempts: 1,
       policy: { enableWrites: true, audit: record => void records.push(record) },
@@ -46,17 +47,17 @@ async function outputs(apiKey: string): Promise<{ refused?: string; outputs: unk
     return { refused: (error as Error).message, outputs: [(error as Error).message, (error as Error).name] };
   }
   const results = [
-    await gw.callTool('get_item', { itemId: 'i1' }, { caller: 'person-1', requestId: 'r1' }),
-    await gw.callTool('create_item', { name: 'n' }, { caller: 'person-1', requestId: 'r2' }),
-    await gw.callTool('get_item', { itemId: 'missing' }),
+    await gw.callTool('get_event', { eventId: 'i1' }, { caller: 'person-1', requestId: 'r1' }),
+    await gw.callTool('create_task', { title: 'n' }, { caller: 'person-1', requestId: 'r2' }),
+    await gw.callTool('get_event', { eventId: 'missing' }),
     await gw.callTool('no_such_tool', {}),
-    await gw.callTool('get_item', { unknown: 1 }),
+    await gw.callTool('get_event', { unknown: 1 }),
   ];
   return { outputs: [gw.tools, ...results, ...records] };
 }
 
 describe('the sink check', () => {
-  it('holds for the round-7 countergoogles', async () => {
+  it('holds for the round-7 counterexamples', async () => {
     for (const apiKey of [
       'riskLevelQz7pX2vK9mWb',
       'Zq7pX2visError9mWb4TnR',
@@ -73,12 +74,12 @@ describe('the sink check', () => {
 
   it('refuses a key that is not printable ASCII before anything is built from it', () => {
     for (const apiKey of ['URI malformedQz7pX2vK9mWb\uD800', 'Zq7pX2vK9mWb4TnRé', 'Zq7pX2 vK9mWb4TnR8y']) {
-      expect(() => createGoogleGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/key was refused/);
+      expect(() => createGoogleGateway({ ...APP, refreshToken: apiKey }), apiKey).toThrow(/key was refused/);
     }
   });
 
   it('refuses a key that shares a piece with the tool list', () => {
-    expect(() => createGoogleGateway({ apiKey: 'riskLevelQz7pX2vK9mWb', baseUrl: BASE })).toThrow(/key was refused/);
+    expect(() => createGoogleGateway({ ...APP, refreshToken: 'riskLevelQz7pX2vK9mWb' })).toThrow(/key was refused/);
   });
 
   it('holds for keys spliced from the outputs of a normal session', async () => {
@@ -107,34 +108,35 @@ describe('the sink check', () => {
 });
 
 describe('failure texts', () => {
-  it('replaces texts in failure lists of a successful answer, for reads and writes', async () => {
+  it('passes on only the fields of ours, so failure lists in a successful answer never reach a host', async () => {
     const gw = createGoogleGateway({
-      apiKey: PLAIN,
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: PLAIN,
       maxAttempts: 1,
       policy: { enableWrites: true },
-      fetchImpl: async () => json({ data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
+      fetchImpl: async input =>
+        String(input).startsWith(TOKEN_URL)
+          ? json(tokenAnswer())
+          : json({ id: 'x', data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
     });
-    for (const result of [await gw.callTool('get_item', { itemId: 'x' }), await gw.callTool('create_item', { name: 'n' })]) {
+    for (const result of [await gw.callTool('get_event', { eventId: 'x' }), await gw.callTool('create_task', { title: 'n' })]) {
+      expect(result.isError).toBeUndefined();
       expect(JSON.stringify(result)).not.toContain('Vendor');
-      expect(result.structuredContent).toMatchObject({
-        data: { failures: [{ message: 'Google API request failed.' }], errors: [{ message: 'Google API request failed.' }] },
-      });
     }
   });
 });
 
 describe('round 8', () => {
   it('throws construction errors in final form: no frames or paths in the stack, no cause', () => {
-    for (const [apiKey, baseUrl] of [
+    for (const [apiKey, clientId] of [
       ['scratchpadQz7pX2vK9mWb', ''],
-      ['scratchpadQz7pX2vK9mWb', 'bad'],
-      ['Zq7pX2-node:i-Wb4TnR', 'bad'],
-      ['short', 'bad'],
+      ['scratchpadQz7pX2vK9mWb', 'bad id'],
+      ['Zq7pX2-node:i-Wb4TnR', 'bad id'],
+      ['short', 'bad id'],
     ] as const) {
       let caught: Error | undefined;
       try {
-        createGoogleGateway({ apiKey, baseUrl });
+        createGoogleGateway({ clientId, clientSecret: APP.clientSecret, refreshToken: apiKey });
       } catch (error) {
         caught = error as Error;
       }
@@ -147,37 +149,62 @@ describe('round 8', () => {
     }
   });
 
-  it('reduces every element of a failure list, whatever its fields, also below a wrapper', async () => {
-    for (const body of [
-      { data: { failures: [{ reason: 'Vendor diagnostic' }], errors: [{ code: 'Vendor diagnostic' }] } },
-      { failures: [{ code: 'Vendor diagnostic' }] },
-    ]) {
-      const gw = createGoogleGateway({
-        apiKey: PLAIN,
-        baseUrl: BASE,
-        maxAttempts: 1,
-        policy: { enableWrites: true },
-        fetchImpl: async () => json(body),
-      });
-      for (const result of [await gw.callTool('get_item', { itemId: 'x' }), await gw.callTool('create_item', { name: 'n' })]) {
-        expect(JSON.stringify(result)).not.toContain('Vendor');
-        expect(JSON.stringify(result.structuredContent)).toContain('"message":"Google API request failed."');
-      }
-    }
-  });
-
-  it('quotes no configured address in network, timeout or redirect errors', async () => {
-    const ADDRESS = 'https://api.vendor-name.invalid/v1';
+  it('quotes no address in network or redirect errors', async () => {
     for (const fetchImpl of [
       async () => {
         throw new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }) });
       },
-      async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.invalid/' } }),
+      async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere-name.invalid/' } }),
     ] as Array<typeof fetch>) {
-      const gw = createGoogleGateway({ apiKey: PLAIN, baseUrl: ADDRESS, allowCustomBaseUrl: true, maxAttempts: 1, fetchImpl });
-      const result = await gw.callTool('get_item', { itemId: 'x' });
+      const gw = createGoogleGateway({ ...APP, refreshToken: PLAIN, maxAttempts: 1, fetchImpl });
+      const result = await gw.callTool('get_event', { eventId: 'x' });
       expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).not.toContain('vendor-name');
+      expect(JSON.stringify(result)).not.toContain('elsewhere-name');
+      expect(JSON.stringify(result)).not.toContain('googleapis');
     }
+  });
+});
+
+describe('tokens Google gives later', () => {
+  // Tokens that share a piece with the fixed fallback ('Withheld: …') and with the redaction marker.
+  const COLLIDING_ACCESS = `at-${'w3'.repeat(6)}Withheld${'w3'.repeat(6)}`;
+  const COLLIDING_REFRESH = `rt-${'q7'.repeat(6)}Withheld${'q7'.repeat(6)}`;
+
+  it('never uses a new access token that shares a piece with the fallbacks, so no output holds a piece of it', async () => {
+    const records: unknown[] = [];
+    const sent: string[] = [];
+    const gw = createGoogleGateway({
+      ...APP,
+      refreshToken: PLAIN,
+      policy: { enableWrites: true, audit: record => void records.push(record) },
+      fetchImpl: async (input, init) => {
+        const url = String(input).split('?')[0] ?? '';
+        if (url === TOKEN_URL) return json(tokenAnswer({ access_token: COLLIDING_ACCESS }));
+        sent.push(new Headers(init?.headers).get('authorization') ?? '');
+        return json({ id: 'i1', summary: 'Event one', status: 'confirmed' });
+      },
+    });
+    const result = await gw.callTool('get_event', { eventId: 'i1' });
+    expect(result.isError).toBe(true);
+    expect(sent).toEqual([]);
+    expect(leaked(COLLIDING_ACCESS.slice(15, 23), [result, records])).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('Withheld: the answer');
+  });
+
+  it('does not take up a rotated refresh token that shares a piece with the fallbacks', async () => {
+    const saved: string[] = [];
+    const gw = createGoogleGateway({
+      ...APP,
+      refreshToken: PLAIN,
+      onRefreshToken: token => void saved.push(token),
+      fetchImpl: async input => {
+        const url = String(input).split('?')[0] ?? '';
+        if (url === TOKEN_URL) return json(tokenAnswer({ refresh_token: COLLIDING_REFRESH }));
+        return json({ id: 'i1', summary: 'Event one', status: 'confirmed' });
+      },
+    });
+    const result = await gw.callTool('get_event', { eventId: 'i1' });
+    expect(result.isError).not.toBe(true);
+    expect(saved).toEqual([]);
   });
 });

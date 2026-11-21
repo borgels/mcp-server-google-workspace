@@ -30,18 +30,24 @@ import {
  * instance policy and audit are shared with the MCP server in
  * src/tools/google.ts.
  *
- * Several gateway instances (for google one per tenant) can run in one
- * process. Each instance uses only the credentials passed to
- * createGoogleGateway (never GOOGLE_WORKSPACE_API_KEY or GOOGLE_WORKSPACE_BASE_URL from the
- * environment) and redacts errors with its own secrets only.
+ * One instance per connected Google account. Several instances can run in
+ * one process. Each instance uses only the credentials passed to
+ * createGoogleGateway (the app's client id and secret and the account's
+ * refresh token; never GOOGLE_WORKSPACE_CLIENT_ID, GOOGLE_WORKSPACE_CLIENT_SECRET
+ * or GOOGLE_WORKSPACE_REFRESH_TOKEN from the environment) and redacts errors
+ * with its own secrets only.
  *
  * Instance policy (writes, disabled tools, audit) comes from the host when it
  * passes `policy`: that instance then reads none of GOOGLE_WORKSPACE_ENABLE_WRITES,
- * GOOGLE_WORKSPACE_DISABLED_TOOLS, GOOGLE_WORKSPACE_AUDIT_LOG or GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL,
+ * GOOGLE_WORKSPACE_DISABLED_TOOLS or GOOGLE_WORKSPACE_AUDIT_LOG,
  * so two tenants in one process can have different settings. Without
  * `policy` the instance uses the environment, as the MCP server does. Limits
  * (timeouts, retries) are still read from the environment and apply to every
  * instance.
+ *
+ * What no policy can turn on: a request outside the client's fixed list of
+ * writes (src/google/client.ts, ALLOWED_WRITES). There is no DELETE, and no
+ * tool that sends mail, shares a file or changes who owns it.
  */
 
 export type { AuditSink, InstancePolicy } from './google/policy.js';
@@ -97,11 +103,14 @@ export interface GatewayToolCatalogEntry {
   readonly broad: boolean;
 }
 
-export interface GoogleGatewayOptions extends Omit<GoogleClientOptions, 'apiKey' | 'baseUrl' | 'credentialEnv'> {
-  /** API key of this instance. Required; never read from the environment. */
-  apiKey: string;
-  /** API base URL of this instance. Required; never read from the environment. */
-  baseUrl: string;
+export interface GoogleGatewayOptions
+  extends Omit<GoogleClientOptions, 'clientId' | 'clientSecret' | 'refreshToken' | 'credentialEnv'> {
+  /** The app's OAuth client id. Required; never read from the environment. */
+  clientId: string;
+  /** The app's OAuth client secret. Required; a secret. */
+  clientSecret: string;
+  /** The refresh token the account's consent gave. Required; a secret. */
+  refreshToken: string;
   /**
    * Instance policy from the host. When given, the instance reads no policy
    * or audit variables from the environment (see InstancePolicy). A host
@@ -168,7 +177,9 @@ export const googleToolCatalog: readonly GatewayToolCatalogEntry[] = deepFreeze(
   })),
 );
 
-function requiredCredential(options: GoogleGatewayOptions, name: 'apiKey' | 'baseUrl'): string {
+type SecretName = 'clientSecret' | 'refreshToken';
+
+function admittedSecret(options: GoogleGatewayOptions, name: SecretName): string {
   const value: unknown = (options as Partial<GoogleGatewayOptions> | undefined)?.[name];
   if (typeof value !== 'string' || value.trim() === '') {
     throw new ConfigError(
@@ -176,59 +187,85 @@ function requiredCredential(options: GoogleGatewayOptions, name: 'apiKey' | 'bas
     );
   }
   // Key admission (src/key-admission.ts): printable ASCII of 16 characters or more, sharing no piece with any text of
-  // ours. Checked before anything is built from the key; the refusal is a fixed text that holds no piece of it.
-  if (name === 'apiKey' && !admitsKey(value.trim())) {
+  // ours. Checked before anything is built from the secret; the refusal is a fixed text that holds no piece of it.
+  if (!admitsKey(value.trim())) {
     throw new ConfigError(keyRefusedText(value.trim()));
   }
   return value.trim();
 }
 
+function requiredClientId(options: GoogleGatewayOptions): string {
+  const value: unknown = (options as Partial<GoogleGatewayOptions> | undefined)?.clientId;
+  // Not a secret, but sent in a form: printable ASCII without spaces.
+  if (typeof value !== 'string' || !/^[\x21-\x7e]{1,300}$/.test(value.trim())) {
+    throw new ConfigError('createGoogleGateway requires options.clientId. Embedded instances do not read credentials from the environment.');
+  }
+  return value.trim();
+}
+
+/** The given form of each secret option, admitted or not, so every error can be masked against it. */
+function givenSecrets(options: GoogleGatewayOptions): string[] {
+  const forms: string[] = [];
+  for (const name of ['clientSecret', 'refreshToken'] as const) {
+    const value: unknown = (options as Partial<GoogleGatewayOptions> | undefined)?.[name];
+    if (typeof value === 'string' && value !== '') forms.push(value, value.trim());
+  }
+  return forms;
+}
+
+interface GoogleCredentials {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}
+
 /**
- * Create one gateway instance. `apiKey` and `baseUrl` are required and
- * are the only credentials the instance uses; a missing value fails here.
+ * Create one gateway instance for one Google account. `clientId`,
+ * `clientSecret` and `refreshToken` are required and are the only credentials
+ * the instance uses; a missing value fails here.
  */
 export function createGoogleGateway(options: GoogleGatewayOptions) {
-  let apiKey: string | undefined;
-  let guard: SecretRedactor | undefined;
+  let firstSecret: string | undefined;
+  const guard = new SecretRedactor();
   // What the host gave, admitted or not: every error is masked against it.
-  const given: unknown = (options as Partial<GoogleGatewayOptions> | undefined)?.apiKey;
-  const secrets = typeof given === 'string' ? [given, given.trim()] : [];
+  const secrets = givenSecrets(options);
+  const refusal = () => keyRefusedText(firstSecret ?? '');
   try {
-    // Admission first, before a redactor is built from the key.
-    apiKey = requiredCredential(options, 'apiKey');
-    guard = new SecretRedactor().addSecret(apiKey);
-    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
+    for (const form of secrets) guard.addSecret(form);
+    // Admission of the secrets, before a redactor is built from them.
+    const clientSecret = admittedSecret(options, 'clientSecret');
+    firstSecret = clientSecret;
+    const refreshToken = admittedSecret(options, 'refreshToken');
+    if (refreshToken === clientSecret) throw new ConfigError(refusal());
+    const credentials: GoogleCredentials = { clientId: requiredClientId(options), clientSecret, refreshToken };
+    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of a secret.
     if (leaksSecret(fixedOutputs(), guard)) {
-      throw new ConfigError(keyRefusedText(apiKey));
+      throw new ConfigError(refusal());
     }
-    const gateway = buildGateway(options, apiKey);
-    // The tool list leaves the gateway as it is: a key that shares a piece with it is refused.
+    const gateway = buildGateway(options, credentials);
+    // The tool list leaves the gateway as it is: a secret that shares a piece with it is refused.
     if (leaksSecret(gateway.tools, guard)) {
-      throw new ConfigError(keyRefusedText(apiKey));
+      throw new ConfigError(refusal());
     }
     return gateway;
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    let message = raw;
-    if (guard && apiKey !== undefined) {
-      // Redacted, then checked whole as the very last step: a message that still holds a piece of the key becomes
-      // the fixed refusal.
-      message = guard.redact(raw);
-      if (leaksSecret(message, guard)) message = keyRefusedText(apiKey);
-    }
+    // Redacted, then checked whole as the very last step: a message that still holds a piece of a secret becomes the
+    // fixed refusal.
+    let message = guard.redact(raw);
+    if (leaksSecret(message, guard)) message = refusal();
     // A fresh error in final form (src/key-admission.ts, sealedError): no cause, a stack without frames, and name,
-    // message and stack masked against the key. Then the sink check on the finished object.
+    // message and stack masked against every secret. Then the sink check on the finished object.
     const final = sealedError(error instanceof ConfigError ? new ConfigError(message) : new Error(message), ...secrets);
-    if (guard && apiKey !== undefined && leaksSecret(final, guard)) {
-      throw sealedError(new ConfigError(keyRefusedText(apiKey)), ...secrets);
+    if (leaksSecret(final, guard)) {
+      throw sealedError(new ConfigError(refusal()), ...secrets);
     }
     throw final;
   }
 }
 
-function buildGateway(options: GoogleGatewayOptions, apiKey: string) {
-  const baseUrl = requiredCredential(options, 'baseUrl');
-  const { policy: hostPolicy, ...clientOptions } = options;
+function buildGateway(options: GoogleGatewayOptions, credentials: GoogleCredentials) {
+  const { policy: hostPolicy, clientId: _c, clientSecret: _s, refreshToken: _r, ...clientOptions } = options;
   const policy =
     hostPolicy === undefined ? undefined : resolveInstancePolicy(hostPolicy, GOOGLE_WORKSPACE_TOOLS.map(tool => tool.name));
   if (policy === undefined) {
@@ -238,11 +275,16 @@ function buildGateway(options: GoogleGatewayOptions, apiKey: string) {
   }
   const client = new GoogleClient({
     ...clientOptions,
-    apiKey,
-    baseUrl,
+    ...credentials,
     credentialEnv: {},
-    // Under a host's policy nothing is read from the environment, this switch included.
-    ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
+    // A token Google gives later passes the same admission as the host's secrets: the corpus filter, and no piece
+    // shared with the fixed fallbacks or the tool list, so the sink check's fallback never holds a piece of it.
+    admitToken: token => {
+      if (!admitsKey(token)) return false;
+      const own = new SecretRedactor();
+      own.addSecret(token);
+      return !leaksSecret(fixedOutputs(), own) && !leaksSecret(googleGatewayTools, own);
+    },
   });
   const redactor: SecretRedactor = client.redactor;
   // Every call in a scope of its own, with or without a host policy: a call made from inside another
