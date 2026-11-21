@@ -6,7 +6,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for Google Wo
 
 - Read-only by default; writes are opt-in per instance.
 - **No restricted scopes.** No Gmail and no Drive scope, so the OAuth app needs Google's sensitive-scope verification but no CASA security assessment. Documents and spreadsheets are opened by their id or link.
-- **Nothing is deleted, shared or sent by mail.** The client has a fixed list of writes and no DELETE; calendar changes are sent with `sendUpdates=none`; values are written to Sheets as `RAW`, so text is never run as a formula. Every change answers with the values before it, so it can be undone.
+- **Nothing is deleted, shared or sent by mail.** The client has a fixed list of writes and no DELETE; calendar changes are sent with `sendUpdates=none`, so Google sends attendees no invitation or update (Google notes that a few mails can still be sent, for example a reply to the organizer when attendees change their own status); values are written to Sheets as `RAW`, so text is never run as a formula. Every change answers with the values before it, so it can be undone.
 - One Google account per server instance (an OAuth refresh token); the server does no per-user authorization itself (see [Security model](#security-model)).
 - Two transports: stdio for local clients, stateless streamable HTTP for containers and gateways.
 - Embeddable: the `./gateway` export exposes the same tools, validation, policy and audit to a host application.
@@ -19,8 +19,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for Google Wo
 | `google_list_calendars` | The calendars the account can see. |
 | `google_list_events` | Events in a calendar, by time and search text, recurring events as single occurrences. |
 | `google_get_event` | One event. |
-| `google_create_event` *(write)* | Create an event (no mail to attendees). |
-| `google_update_event` *(write)* | Change title, description, place, time or attendees of an event (no mail). |
+| `google_create_event` *(write)* | Create an event (`sendUpdates=none`: no invitation to attendees). |
+| `google_update_event` *(write)* | Change title, description, place, time or attendees of an event (`sendUpdates=none`). |
 | `google_get_spreadsheet` | A spreadsheet's title and sheets. |
 | `google_read_range` | Values in a range (A1 notation), as shown. |
 | `google_update_range` *(write)* | Write values into a range (`RAW`). |

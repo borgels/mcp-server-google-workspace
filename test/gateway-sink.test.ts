@@ -164,3 +164,47 @@ describe('round 8', () => {
     }
   });
 });
+
+describe('tokens Google gives later', () => {
+  // Tokens that share a piece with the fixed fallback ('Withheld: …') and with the redaction marker.
+  const COLLIDING_ACCESS = `at-${'w3'.repeat(6)}Withheld${'w3'.repeat(6)}`;
+  const COLLIDING_REFRESH = `rt-${'q7'.repeat(6)}Withheld${'q7'.repeat(6)}`;
+
+  it('never uses a new access token that shares a piece with the fallbacks, so no output holds a piece of it', async () => {
+    const records: unknown[] = [];
+    const sent: string[] = [];
+    const gw = createGoogleGateway({
+      ...APP,
+      refreshToken: PLAIN,
+      policy: { enableWrites: true, audit: record => void records.push(record) },
+      fetchImpl: async (input, init) => {
+        const url = String(input).split('?')[0] ?? '';
+        if (url === TOKEN_URL) return json(tokenAnswer({ access_token: COLLIDING_ACCESS }));
+        sent.push(new Headers(init?.headers).get('authorization') ?? '');
+        return json({ id: 'i1', summary: 'Event one', status: 'confirmed' });
+      },
+    });
+    const result = await gw.callTool('get_event', { eventId: 'i1' });
+    expect(result.isError).toBe(true);
+    expect(sent).toEqual([]);
+    expect(leaked(COLLIDING_ACCESS.slice(15, 23), [result, records])).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('Withheld: the answer');
+  });
+
+  it('does not take up a rotated refresh token that shares a piece with the fallbacks', async () => {
+    const saved: string[] = [];
+    const gw = createGoogleGateway({
+      ...APP,
+      refreshToken: PLAIN,
+      onRefreshToken: token => void saved.push(token),
+      fetchImpl: async input => {
+        const url = String(input).split('?')[0] ?? '';
+        if (url === TOKEN_URL) return json(tokenAnswer({ refresh_token: COLLIDING_REFRESH }));
+        return json({ id: 'i1', summary: 'Event one', status: 'confirmed' });
+      },
+    });
+    const result = await gw.callTool('get_event', { eventId: 'i1' });
+    expect(result.isError).not.toBe(true);
+    expect(saved).toEqual([]);
+  });
+});

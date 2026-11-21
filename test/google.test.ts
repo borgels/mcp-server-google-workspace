@@ -434,7 +434,7 @@ describe('contacts', () => {
     expect(calls[0]!.body).toEqual({
       names: [{ givenName: 'Anna', familyName: 'Jensen' }],
       emailAddresses: [{ value: 'anna@example.dk' }],
-      organizations: [{ name: 'Demo Byg ApS', title: '' }],
+      organizations: [{ name: 'Demo Byg ApS' }],
     });
     expect(data).toEqual(SHAPED);
   });
@@ -456,7 +456,7 @@ describe('contacts', () => {
       etag: PERSON.etag,
       metadata: { sources: [{ type: 'CONTACT', id: '6301234567890abc', etag: '#AxBQXhMWF0E=' }] },
     });
-    expect(data.before).toEqual({ phones: ['+45 12 34 56 78'] });
+    expect(data.before).toEqual({ phones: [{ value: '+45 12 34 56 78' }] });
   });
 
   it('keeps the parts of the name and the company that are not given', async () => {
@@ -469,6 +469,52 @@ describe('contacts', () => {
     expect((name.calls[1]!.body as Record<string, unknown>).names).toEqual([{ givenName: 'Anne', familyName: 'Jensen' }]);
     const company = await call(routes, 'update_contact', { contact: id, organization: { name: 'Demo Ejendomme ApS' } });
     expect((company.calls[1]!.body as Record<string, unknown>).organizations).toEqual([{ name: 'Demo Ejendomme ApS', title: 'Projektleder' }]);
+  });
+
+  it('keeps every other part of the name, every other organization and the labels on numbers, and answers with them whole', async () => {
+    const id = 'c7142250453257580122';
+    const full = {
+      ...PERSON,
+      names: [
+        {
+          metadata: { primary: true },
+          displayName: 'Dr. Anna Marie Jensen',
+          unstructuredName: 'Dr. Anna Marie Jensen',
+          honorificPrefix: 'Dr.',
+          givenName: 'Anna',
+          middleName: 'Marie',
+          familyName: 'Jensen',
+        },
+      ],
+      phoneNumbers: [{ value: '+45 12 34 56 78', type: 'work', formattedType: 'Arbejde', canonicalForm: '+4512345678' }],
+      organizations: [
+        { metadata: { primary: true }, name: 'Demo Byg ApS', title: 'Projektleder', department: 'Tømrer', current: true },
+        { name: 'Demo Ejendomme ApS', title: 'Bestyrelsesmedlem' },
+      ],
+    };
+    const routes = {
+      [`GET ${PEOPLE}/people/${id}`]: { body: full },
+      [`PATCH ${PEOPLE}/people/${id}:updateContact`]: { body: full },
+    };
+    const name = await call(routes, 'update_contact', { contact: id, givenName: 'Anne' });
+    expect((name.calls[1]!.body as Record<string, unknown>).names).toEqual([
+      { honorificPrefix: 'Dr.', givenName: 'Anne', middleName: 'Marie', familyName: 'Jensen' },
+    ]);
+    expect(name.data.before).toEqual({ names: [{ honorificPrefix: 'Dr.', givenName: 'Anna', middleName: 'Marie', familyName: 'Jensen' }] });
+
+    const title = await call(routes, 'update_contact', { contact: id, organization: { title: 'Formand' } });
+    const organizations = [
+      { name: 'Demo Byg ApS', title: 'Formand', department: 'Tømrer', current: true },
+      { name: 'Demo Ejendomme ApS', title: 'Bestyrelsesmedlem' },
+    ];
+    expect((title.calls[1]!.body as Record<string, unknown>).organizations).toEqual(organizations);
+    expect(title.data.before).toEqual({ organizations: [{ ...organizations[0], title: 'Projektleder' }, organizations[1]] });
+
+    const phones = await call(routes, 'update_contact', { contact: id, phones: ['+45 12 34 56 78', '+45 87 65 43 21'] });
+    expect((phones.calls[1]!.body as Record<string, unknown>).phoneNumbers).toEqual([
+      { value: '+45 12 34 56 78', type: 'work' },
+      { value: '+45 87 65 43 21' },
+    ]);
   });
 
   it('changes nothing when Google gives no contact source with its version', async () => {

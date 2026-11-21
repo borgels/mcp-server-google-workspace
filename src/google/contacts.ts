@@ -61,50 +61,104 @@ export interface ContactFields {
   organization?: { name?: string; title?: string };
 }
 
-/** The current values a partial change keeps: the name and the first organization as the contact has them. */
-interface Current {
-  givenName?: string;
-  familyName?: string;
-  organization?: { name?: string; title?: string };
-}
+/** The writable parts of a name and an organization (People API, Name and Organization); the rest is Google's own. */
+const NAME_FIELDS = [
+  'givenName',
+  'familyName',
+  'middleName',
+  'honorificPrefix',
+  'honorificSuffix',
+  'phoneticFullName',
+  'phoneticFamilyName',
+  'phoneticGivenName',
+  'phoneticMiddleName',
+  'phoneticHonorificPrefix',
+  'phoneticHonorificSuffix',
+] as const;
+const ORGANIZATION_FIELDS = [
+  'type',
+  'startDate',
+  'endDate',
+  'current',
+  'name',
+  'phoneticName',
+  'department',
+  'title',
+  'jobDescription',
+  'symbol',
+  'domain',
+  'location',
+  'costCenter',
+  'fullTimeEquivalentMillipercent',
+] as const;
+const ENTRY_FIELDS = ['value', 'type'] as const;
 
-function currentOf(person: Json): Current {
-  const name = obj(arr(person.names)[0]);
-  const org = obj(arr(person.organizations)[0]);
-  const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
-  return {
-    givenName: text(name.givenName),
-    familyName: text(name.familyName),
-    organization: arr(person.organizations).length > 0 ? { name: text(org.name), title: text(org.title) } : undefined,
-  };
+function writable(value: unknown, fields: readonly string[]): Json {
+  const entry = obj(value);
+  return Object.fromEntries(fields.filter(field => entry[field] !== undefined).map(field => [field, entry[field]]));
 }
 
 /**
- * The person body and the field masks it sets. Google replaces a whole field the mask names, so a part of the name or
- * the organization that is not given keeps the value the contact has (`current`).
+ * The contact's own entries as they can be sent back: every writable part of every name, organization, address and
+ * number. Google replaces a whole field the mask names, so a change starts from these and sets only what is given.
+ * `unstructuredName` is left out: Google makes it from the parts, and an old one would win over a changed part.
  */
-function personBody(fields: ContactFields, current: Current = {}): { body: Json; masks: string[] } {
+interface Current {
+  names: Json[];
+  organizations: Json[];
+  emailAddresses: Json[];
+  phoneNumbers: Json[];
+}
+
+function currentOf(person: Json): Current {
+  return {
+    names: arr(person.names).map(n => writable(n, NAME_FIELDS)),
+    organizations: arr(person.organizations).map(o => writable(o, ORGANIZATION_FIELDS)),
+    emailAddresses: arr(person.emailAddresses).map(e => writable(e, ENTRY_FIELDS)),
+    phoneNumbers: arr(person.phoneNumbers).map(e => writable(e, ENTRY_FIELDS)),
+  };
+}
+
+const EMPTY: Current = { names: [], organizations: [], emailAddresses: [], phoneNumbers: [] };
+
+/** The given values as entries, each keeping the label (work, home, ...) an entry with the same value has today. */
+function entries(values: string[], current: Json[]): Json[] {
+  return values.map(value => {
+    const same = current.find(entry => entry.value === value);
+    return same?.type !== undefined ? { value, type: same.type } : { value };
+  });
+}
+
+/**
+ * The person body and the field masks it sets. Google replaces a whole field the mask names, so the first name and the
+ * first organization are changed in place, with every other part and every other name or organization kept as the
+ * contact has them (`current`).
+ */
+function personBody(fields: ContactFields, current: Current = EMPTY): { body: Json; masks: string[] } {
   const body: Json = {};
   const masks: string[] = [];
   if (fields.givenName !== undefined || fields.familyName !== undefined) {
-    body.names = [{ givenName: fields.givenName ?? current.givenName ?? '', familyName: fields.familyName ?? current.familyName ?? '' }];
+    const [first = {}, ...rest] = current.names;
+    const name: Json = { ...first };
+    if (fields.givenName !== undefined) name.givenName = fields.givenName;
+    if (fields.familyName !== undefined) name.familyName = fields.familyName;
+    body.names = [name, ...rest];
     masks.push('names');
   }
   if (fields.emails !== undefined) {
-    body.emailAddresses = fields.emails.map(value => ({ value }));
+    body.emailAddresses = entries(fields.emails, current.emailAddresses);
     masks.push('emailAddresses');
   }
   if (fields.phones !== undefined) {
-    body.phoneNumbers = fields.phones.map(value => ({ value }));
+    body.phoneNumbers = entries(fields.phones, current.phoneNumbers);
     masks.push('phoneNumbers');
   }
   if (fields.organization !== undefined) {
-    body.organizations = [
-      {
-        name: fields.organization.name ?? current.organization?.name ?? '',
-        title: fields.organization.title ?? current.organization?.title ?? '',
-      },
-    ];
+    const [first = {}, ...rest] = current.organizations;
+    const organization: Json = { ...first };
+    if (fields.organization.name !== undefined) organization.name = fields.organization.name;
+    if (fields.organization.title !== undefined) organization.title = fields.organization.title;
+    body.organizations = [organization, ...rest];
     masks.push('organizations');
   }
   return { body, masks };
@@ -115,11 +169,11 @@ export async function createContact(client: UpstreamClient, input: ContactFields
   return shapePerson(await client.post('people', '/people:createContact', body, { personFields: PERSON_FIELDS }));
 }
 
-const MASK_TO_FIELDS: Record<string, string[]> = {
-  names: ['givenName', 'familyName'],
-  emailAddresses: ['emails'],
-  phoneNumbers: ['phones'],
-  organizations: ['organizations'],
+const MASK_TO_BEFORE: Record<string, string> = {
+  names: 'names',
+  emailAddresses: 'emails',
+  phoneNumbers: 'phones',
+  organizations: 'organizations',
 };
 
 export async function updateContact(client: UpstreamClient, input: ContactFields & { contact: string }): Promise<unknown> {
@@ -136,13 +190,13 @@ export async function updateContact(client: UpstreamClient, input: ContactFields
     throw new Error("Google did not give the contact's version; nothing was changed.");
   }
   const { body, masks } = personBody(input, currentOf(current));
-  const before = shapePerson(current);
   const updated = await client.patch(
     'people',
     `${path}:updateContact`,
     { ...body, etag: current.etag, metadata: { sources } },
     { updatePersonFields: masks.join(','), personFields: PERSON_FIELDS },
   );
-  const keys = masks.flatMap(mask => MASK_TO_FIELDS[mask] ?? []);
-  return { contact: shapePerson(updated), before: Object.fromEntries(keys.map(key => [key, before[key]])) };
+  // The values before, whole: every writable part of each field the change replaced, so it can be put back.
+  const was = currentOf(current);
+  return { contact: shapePerson(updated), before: Object.fromEntries(masks.map(mask => [MASK_TO_BEFORE[mask], was[mask as keyof Current]])) };
 }

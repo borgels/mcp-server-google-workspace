@@ -277,6 +277,14 @@ function buildGateway(options: GoogleGatewayOptions, credentials: GoogleCredenti
     ...clientOptions,
     ...credentials,
     credentialEnv: {},
+    // A token Google gives later passes the same admission as the host's secrets: the corpus filter, and no piece
+    // shared with the fixed fallbacks or the tool list, so the sink check's fallback never holds a piece of it.
+    admitToken: token => {
+      if (!admitsKey(token)) return false;
+      const own = new SecretRedactor();
+      own.addSecret(token);
+      return !leaksSecret(fixedOutputs(), own) && !leaksSecret(googleGatewayTools, own);
+    },
   });
   const redactor: SecretRedactor = client.redactor;
   // Every call in a scope of its own, with or without a host policy: a call made from inside another

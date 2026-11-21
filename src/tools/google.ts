@@ -101,7 +101,7 @@ function defineTool<S extends z.ZodRawShape>(definition: Omit<ToolDefinition<S>,
 const MAX_PAGE_SIZE_NOTE = 'Use nextPageToken from the answer for more.';
 
 const optionalCalendar = calendarIdSchema.optional().describe('The calendar: `primary` (default) or an id from list_calendars.');
-const attendeesSchema = z.array(emailSchema).max(50).describe('E-mail addresses of the attendees. No invitation is sent by mail.');
+const attendeesSchema = z.array(emailSchema).max(50).describe('E-mail addresses of the attendees. Sent with sendUpdates=none, so Google sends them no invitation.');
 const cellRows = (what: string) => z.array(z.array(cellSchema).max(500)).min(1).max(5000).describe(what);
 const dateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.');
 
@@ -200,7 +200,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'google_update_event',
     title: 'Change event (Google Workspace)',
-    description: 'Change fields of an event (title, description, place, time, attendees). The answer has the values before the change. No mail is sent.',
+    description: 'Change fields of an event (title, description, place, time, attendees). The answer has the values before the change. Sent with sendUpdates=none, so Google sends attendees no update.',
     inputShape: { ...eventFieldShape, calendarId: optionalCalendar, eventId: eventIdSchema.describe('The event id from list_events.') },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,

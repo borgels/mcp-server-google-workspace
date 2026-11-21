@@ -20,6 +20,12 @@ export interface GoogleClientOptions {
    */
   onRefreshToken?: (refreshToken: string) => void | Promise<void>;
   /**
+   * Whether a token Google gives (a new access token or a rotated refresh token) may be used. The gateway passes its
+   * key admission, so a token that shares a piece with the server's fixed texts or fallbacks is never used and the
+   * sink check's fallback can never hold a piece of it. Without it, every token of the right form is used.
+   */
+  admitToken?: (token: string) => boolean;
+  /**
    * Where omitted credentials are read from. Defaults to process.env for the
    * standalone server. The gateway passes `{}`, so an embedded instance only
    * ever uses the credentials it was given.
@@ -238,6 +244,7 @@ export class GoogleClient implements UpstreamClient {
   private readonly clientSecret?: string;
   private refreshToken?: string;
   private readonly onRefreshToken?: (refreshToken: string) => void | Promise<void>;
+  private readonly admitToken: (token: string) => boolean;
   private access?: { token: string; expiresAt: number };
   grantedScopes?: readonly string[];
   private readonly retired: string[] = [];
@@ -258,6 +265,7 @@ export class GoogleClient implements UpstreamClient {
     this.clientSecret = options.clientSecret ?? readEnvString('GOOGLE_WORKSPACE_CLIENT_SECRET', credentialEnv);
     this.refreshToken = options.refreshToken ?? readEnvString('GOOGLE_WORKSPACE_REFRESH_TOKEN', credentialEnv);
     this.onRefreshToken = options.onRefreshToken;
+    this.admitToken = options.admitToken ?? (() => true);
     this.redactor = new SecretRedactor()
       .addHeader(API_KEY_HEADER)
       .addSecret(this.clientSecret)
@@ -362,6 +370,9 @@ export class GoogleClient implements UpstreamClient {
     if (typeof token !== 'string' || !TOKEN_TEXT.test(token)) {
       throw new Error('Google answered the token request without an access token. Nothing in the answer was used.');
     }
+    if (!this.admitToken(token)) {
+      throw new Error('Google gave an access token that shares text with this server’s own texts, so it was not used. Try again.');
+    }
     if (value.token_type !== undefined && (typeof value.token_type !== 'string' || value.token_type.toLowerCase() !== 'bearer')) {
       throw new Error('Google answered the token request with another token type than Bearer. Nothing in the answer was used.');
     }
@@ -385,7 +396,8 @@ export class GoogleClient implements UpstreamClient {
     }
     this.access = { token, expiresAt: this.now() + expiresIn * 1000 };
     const rotated = value.refresh_token;
-    if (typeof rotated === 'string' && TOKEN_TEXT.test(rotated) && rotated !== this.refreshToken) {
+    // A rotated token that is not admitted is not taken up: the one in use stays, and Google keeps it valid.
+    if (typeof rotated === 'string' && TOKEN_TEXT.test(rotated) && rotated !== this.refreshToken && this.admitToken(rotated)) {
       this.redactor.addSecret(rotated);
       this.refreshToken = rotated;
       try {
