@@ -173,7 +173,7 @@ const result = await gateway.callTool('list_events', { timeMin: '2026-11-24T00:0
 
 ## Threat model
 
-What this server guarantees about the API key, and what it does not. It is
+What this server guarantees about its secrets, and what it does not. "The key" below means each of them: the OAuth client secret, the refresh token and every access token the instance gets. It is
 the yardstick for every change that touches errors, results or audit.
 
 **Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway

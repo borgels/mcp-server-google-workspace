@@ -129,13 +129,13 @@ describe('GoogleClient and the access token', () => {
   });
 
   it('uses a new refresh token from the answer, gives it to the host and redacts both', async () => {
-    const NEW = '1//0gNewRotatedToken-Kq8Zm3Wv7';
+    const NEW = 'rt-test-NewRotated-Kq8Zm3Wv7';
     const saved: string[] = [];
     const fetchImpl = makeFetch(() => ({ ok: true }), () => jsonResponse(tokenAnswer({ refresh_token: NEW }), 200));
     const client = makeClient(fetchImpl, { onRefreshToken: token => void saved.push(token) });
     await client.get('calendar', '/x');
     expect(saved).toEqual([NEW]);
-    expect(client.redactor.redact(`${REFRESH} ${NEW} ${ACCESS}`)).not.toMatch(/Rotated|0gHv7Q|a0Hq4Z/);
+    expect(client.redactor.redact(`${REFRESH} ${NEW} ${ACCESS}`)).not.toMatch(/Rotated|Hv7Qm2|Hq4Zn8/);
 
     // A host's failing callback does not fail the call.
     const failing = makeClient(fetchImpl, { onRefreshToken: () => Promise.reject(new Error('store down')) });
@@ -256,7 +256,7 @@ describe('error handling', () => {
 
   it('redacts the access token in use, and lets go of old ones after two renewals', async () => {
     let n = 0;
-    const tokens = ['ya29.first-Zq7pX2vK9mWb', 'ya29.second-Hk4Lm8Np2Qr', 'ya29.third-Tv6Wx1Yz3Ab', 'ya29.fourth-Cd5Ef7Gh9Ij'];
+    const tokens = ['at-first-Zq7pX2vK9mWb', 'at-second-Hk4Lm8Np2Qr', 'at-third-Tv6Wx1Yz3Ab', 'at-fourth-Cd5Ef7Gh9Ij'];
     let now = 0;
     const fetchImpl = makeFetch(() => ({}), () => jsonResponse(tokenAnswer({ access_token: tokens[n++], expires_in: 120 }), 200));
     const client = makeClient(fetchImpl, { now: () => now });

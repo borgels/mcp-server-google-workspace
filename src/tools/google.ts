@@ -242,7 +242,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'google_update_range',
     title: 'Write range (Google Workspace)',
-    description: 'Write values into a range, row by row. Text is stored as text, never as a formula. The answer has the values before the change.',
+    description: 'Write values into a range, row by row. Text is stored as text, never as a formula, and a range that holds formulas is not written. The answer has the values before the change.',
     inputShape: { spreadsheet: fileSchema('spreadsheets'), range: rangeSchema, values: cellRows('The rows of values.') },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
@@ -287,7 +287,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'google_get_document',
     title: 'Read document (Google Workspace)',
-    description: 'The text of a Google Docs document. Give its id or link.',
+    description: 'The text of a Google Docs document, every tab and table included. Give its id or link.',
     inputShape: {
       document: fileSchema('document'),
       maxChars: z.number().int().min(100).max(200_000).optional().describe('At most this many characters (default 50000).'),
@@ -301,7 +301,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'google_append_text',
     title: 'Add text to document (Google Workspace)',
-    description: 'Add text at the end of a document. Nothing in the document is removed or replaced.',
+    description: 'Add text at the end of a document (its first tab). Nothing in the document is removed or replaced.',
     inputShape: { document: fileSchema('document'), text: textSchema(50_000).min(1).describe('The text to add. Start with a line break for a new paragraph.') },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: false,

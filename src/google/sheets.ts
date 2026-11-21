@@ -91,8 +91,13 @@ export async function updateRange(
 ): Promise<unknown> {
   checkCells(input.values);
   const path = `/spreadsheets/${spreadsheetId(input.spreadsheet)}/values/${rangePath(input.range)}`;
-  // The values as they were, so the change can be undone.
-  const before = obj(await client.get('sheets', path, { majorDimension: 'ROWS', valueRenderOption: 'FORMATTED_VALUE' }));
+  // The values as they were, unformatted and with formulas as formulas, so the change can be undone. A range with a
+  // formula in it is not written: values are written as RAW, so a formula could not be put back through this tool.
+  const before = obj(await client.get('sheets', path, { majorDimension: 'ROWS', valueRenderOption: 'FORMULA' }));
+  const previous = rowsOf(before.values);
+  if (previous.some(row => row.some(value => typeof value === 'string' && value.startsWith('=')))) {
+    throw new Error('The range holds formulas, and they are not overwritten. Choose a range without formulas.');
+  }
   const answer = obj(
     await client.put('sheets', path, { range: input.range, majorDimension: 'ROWS', values: input.values }, { valueInputOption: 'RAW' }),
   );
@@ -100,7 +105,7 @@ export async function updateRange(
     updatedRange: answer.updatedRange,
     updatedRows: answer.updatedRows,
     updatedCells: answer.updatedCells,
-    before: { range: before.range, values: rowsOf(before.values) },
+    before: { range: before.range, values: previous },
   };
 }
 

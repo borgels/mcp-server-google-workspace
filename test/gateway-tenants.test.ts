@@ -273,7 +273,7 @@ describe('tool catalog', () => {
       const input = SAMPLE_INPUTS[entry.name];
       expect(input, `sample input for ${entry.name}`).toBeDefined();
       const fetchImpl = vi.fn(async (url: string) =>
-        String(url).startsWith(TOKEN_URL) ? Response.json(tokenAnswer()) : Response.json({ etag: '"e1"', documentId: DOC_ID }),
+        String(url).startsWith(TOKEN_URL) ? Response.json(tokenAnswer()) : Response.json({ etag: '"e1"', documentId: DOC_ID, metadata: { sources: [{ type: 'CONTACT', id: 'c42', etag: '#e1' }] } }),
       );
       const gw = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: fetchImpl as unknown as typeof fetch });
       const result = await gw.callTool(entry.name, input as GatewayJsonObject);

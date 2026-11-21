@@ -300,8 +300,9 @@ export class GoogleClient implements UpstreamClient {
     if (!Object.hasOwn(SERVICES, service)) throw new Error('Unknown Google service.');
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
     const url = new URL(`${SERVICES[service]}${normalizedPath}`);
+    // An empty string is sent as an empty value (People's warm-up search); undefined and null are left out.
     for (const [key, value] of Object.entries(query ?? {})) {
-      if (value === undefined || value === null || value === '') continue;
+      if (value === undefined || value === null) continue;
       url.searchParams.set(key, String(value));
     }
     return url.toString();

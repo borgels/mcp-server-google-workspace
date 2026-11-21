@@ -15,3 +15,7 @@ First version, from the MCP server template with its embedding surface (`./gatew
 - Writes only from a fixed list (`ALLOWED_WRITES`); no DELETE. Calendar changes with `sendUpdates=none`; Sheets
   values as `RAW`. A change answers with the values before it.
 - Answers are cut down to the fields a person reads; nothing else from Google is passed on.
+- A contact change sends the contact source with its version, as Google requires, and keeps the parts of the name
+  and the company that are not given. A search sends Google's warm-up request first.
+- A range that holds formulas is not overwritten; the values before a change are read with formulas.
+- A document is read with all its tabs. Calendar ids with `#` (Google's own calendars) are encoded as one segment.

@@ -9,6 +9,15 @@ import { hasOffset, isDate } from './values.js';
 
 type Json = Record<string, unknown>;
 
+/**
+ * A calendar id as one path segment. The schema admits only letters, digits and `_@.#+-`; `#` (in Google's own
+ * calendars, such as holidays) is percent-encoded, and an id of dots only is refused, so it cannot be a dot segment.
+ */
+export function calendarPath(id: string): string {
+  if (!/^[A-Za-z0-9_@.#+-]{1,320}$/.test(id) || /^\.+$/.test(id)) throw new Error('Invalid calendarId.');
+  return encodeURIComponent(id);
+}
+
 const obj = (value: unknown): Json => (value && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : {});
 const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
@@ -62,7 +71,7 @@ export async function listEvents(
   client: UpstreamClient,
   input: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
 ): Promise<unknown> {
-  const calendarId = encodePathParam(input.calendarId ?? 'primary', 'calendarId');
+  const calendarId = calendarPath(input.calendarId ?? 'primary');
   const answer = obj(
     await client.get('calendar', `/calendars/${calendarId}/events`, {
       timeMin: input.timeMin,
@@ -78,7 +87,7 @@ export async function listEvents(
 }
 
 export async function getEvent(client: UpstreamClient, input: { calendarId?: string; eventId: string }): Promise<unknown> {
-  const calendarId = encodePathParam(input.calendarId ?? 'primary', 'calendarId');
+  const calendarId = calendarPath(input.calendarId ?? 'primary');
   return shapeEvent(await client.get('calendar', `/calendars/${calendarId}/events/${encodePathParam(input.eventId, 'eventId')}`));
 }
 
@@ -114,7 +123,7 @@ export function eventBody(fields: EventFields): Json {
 }
 
 export async function createEvent(client: UpstreamClient, input: EventFields & { calendarId?: string }): Promise<unknown> {
-  const calendarId = encodePathParam(input.calendarId ?? 'primary', 'calendarId');
+  const calendarId = calendarPath(input.calendarId ?? 'primary');
   // No mail to the attendees: sendUpdates=none. The event is in their calendars as Google shows shared events.
   const created = await client.post('calendar', `/calendars/${calendarId}/events`, eventBody(input), { sendUpdates: 'none' });
   return shapeEvent(created);
@@ -124,7 +133,7 @@ export async function updateEvent(
   client: UpstreamClient,
   input: EventFields & { calendarId?: string; eventId: string },
 ): Promise<unknown> {
-  const calendarId = encodePathParam(input.calendarId ?? 'primary', 'calendarId');
+  const calendarId = calendarPath(input.calendarId ?? 'primary');
   const path = `/calendars/${calendarId}/events/${encodePathParam(input.eventId, 'eventId')}`;
   const body = eventBody(input);
   if (Object.keys(body).length === 0) throw new Error('Give at least one field to change.');

@@ -15,9 +15,9 @@ export const USERINFO = SERVICES.userinfo;
 export { TOKEN_URL };
 
 /** App credentials and a refresh token, all made up. */
-export const APP = { clientId: '123456789012-testapp.apps.googleusercontent.com', clientSecret: 'GOCSPX-q8Zr4vLm2Wx7Kp9Nb3Jt' };
-export const REFRESH = '1//0gHv7Qm2Lx9Pz4Wk8Rb5Tn3Yc6';
-export const ACCESS = 'ya29.a0Hq4Zn8Vb2Mx6Lp3Kw9Rt7Ys5';
+export const APP = { clientId: 'test-client-id.example', clientSecret: 'cs-test-q8Zr4vLm2Wx7Kp9Nb3Jt' };
+export const REFRESH = 'rt-test-Hv7Qm2Lx9Pz4Wk8Rb5Tn3Yc6';
+export const ACCESS = 'at-test-Hq4Zn8Vb2Mx6Lp3Kw9Rt7Ys5';
 
 /** The path of an event in the primary calendar, and of the default task list's tasks. */
 export const EVENTS = `${CAL}/calendars/primary/events`;

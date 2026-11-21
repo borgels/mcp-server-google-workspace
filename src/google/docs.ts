@@ -41,9 +41,27 @@ export function textOf(content: unknown, depth = 0): string {
   return text;
 }
 
+/** Every tab of a document in order, child tabs after their parent, each with its title and text. */
+function tabsOf(tabs: unknown, depth = 0, out: Array<{ title: unknown; text: string }> = []): Array<{ title: unknown; text: string }> {
+  if (depth > 8) return out;
+  for (const tab of arr(tabs)) {
+    const t = obj(tab);
+    out.push({ title: obj(t.tabProperties).title, text: textOf(obj(obj(t.documentTab).body).content) });
+    tabsOf(t.childTabs, depth + 1, out);
+  }
+  return out;
+}
+
 export async function getDocument(client: UpstreamClient, input: { document: string; maxChars?: number }): Promise<unknown> {
-  const answer = obj(await client.get('docs', `/documents/${documentId(input.document)}`));
-  const text = textOf(obj(answer.body).content);
+  // includeTabsContent: the text of every tab, not only the first (https://developers.google.com/workspace/docs/api/how-tos/tabs).
+  const answer = obj(await client.get('docs', `/documents/${documentId(input.document)}`, { includeTabsContent: true }));
+  const tabs = tabsOf(answer.tabs);
+  const text =
+    tabs.length === 0
+      ? textOf(obj(answer.body).content)
+      : tabs.length === 1
+        ? tabs[0]!.text
+        : tabs.map(tab => `# ${typeof tab.title === 'string' ? tab.title : ''}\n${tab.text}`).join('\n');
   const maxChars = input.maxChars ?? 50_000;
   return {
     documentId: answer.documentId,

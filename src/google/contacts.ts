@@ -41,6 +41,8 @@ export async function listContacts(client: UpstreamClient, input: { pageSize?: n
 }
 
 export async function searchContacts(client: UpstreamClient, input: { query: string; pageSize?: number }): Promise<unknown> {
+  // Google asks for a warm-up request with an empty query before a search, so the search sees recent contacts.
+  await client.get('people', '/people:searchContacts', { query: '', readMask: PERSON_FIELDS });
   const answer = obj(
     await client.get('people', '/people:searchContacts', { query: input.query, readMask: PERSON_FIELDS, pageSize: input.pageSize ?? 10 }),
   );
@@ -59,12 +61,33 @@ export interface ContactFields {
   organization?: { name?: string; title?: string };
 }
 
-/** The person body and the field masks it sets. */
-function personBody(fields: ContactFields): { body: Json; masks: string[] } {
+/** The current values a partial change keeps: the name and the first organization as the contact has them. */
+interface Current {
+  givenName?: string;
+  familyName?: string;
+  organization?: { name?: string; title?: string };
+}
+
+function currentOf(person: Json): Current {
+  const name = obj(arr(person.names)[0]);
+  const org = obj(arr(person.organizations)[0]);
+  const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
+  return {
+    givenName: text(name.givenName),
+    familyName: text(name.familyName),
+    organization: arr(person.organizations).length > 0 ? { name: text(org.name), title: text(org.title) } : undefined,
+  };
+}
+
+/**
+ * The person body and the field masks it sets. Google replaces a whole field the mask names, so a part of the name or
+ * the organization that is not given keeps the value the contact has (`current`).
+ */
+function personBody(fields: ContactFields, current: Current = {}): { body: Json; masks: string[] } {
   const body: Json = {};
   const masks: string[] = [];
   if (fields.givenName !== undefined || fields.familyName !== undefined) {
-    body.names = [{ givenName: fields.givenName ?? '', familyName: fields.familyName ?? '' }];
+    body.names = [{ givenName: fields.givenName ?? current.givenName ?? '', familyName: fields.familyName ?? current.familyName ?? '' }];
     masks.push('names');
   }
   if (fields.emails !== undefined) {
@@ -76,7 +99,12 @@ function personBody(fields: ContactFields): { body: Json; masks: string[] } {
     masks.push('phoneNumbers');
   }
   if (fields.organization !== undefined) {
-    body.organizations = [{ name: fields.organization.name ?? '', title: fields.organization.title ?? '' }];
+    body.organizations = [
+      {
+        name: fields.organization.name ?? current.organization?.name ?? '',
+        title: fields.organization.title ?? current.organization?.title ?? '',
+      },
+    ];
     masks.push('organizations');
   }
   return { body, masks };
@@ -95,17 +123,24 @@ const MASK_TO_FIELDS: Record<string, string[]> = {
 };
 
 export async function updateContact(client: UpstreamClient, input: ContactFields & { contact: string }): Promise<unknown> {
-  const { body, masks } = personBody(input);
-  if (masks.length === 0) throw new Error('Give at least one field to change.');
+  if (personBody(input).masks.length === 0) throw new Error('Give at least one field to change.');
   const path = `/people/${encodePathParam(contactId(input.contact), 'contact')}`;
-  // The contact as it was: its etag (the API requires it) and the fields, so the change can be undone.
-  const current = obj(await client.get('people', path, { personFields: PERSON_FIELDS }));
-  if (typeof current.etag !== 'string') throw new Error('Google did not give the contact\'s version; nothing was changed.');
+  // The contact as it is: its etag and its contact source with that source's etag (updateContact requires both and
+  // refuses a change to a version that is no longer the newest), and the fields, so the change can be undone.
+  const current = obj(await client.get('people', path, { personFields: `${PERSON_FIELDS},metadata` }));
+  const sources = arr(obj(current.metadata).sources)
+    .map(obj)
+    .filter(source => source.type === 'CONTACT' && typeof source.id === 'string' && typeof source.etag === 'string')
+    .map(source => ({ type: source.type, id: source.id, etag: source.etag }));
+  if (typeof current.etag !== 'string' || sources.length === 0) {
+    throw new Error("Google did not give the contact's version; nothing was changed.");
+  }
+  const { body, masks } = personBody(input, currentOf(current));
   const before = shapePerson(current);
   const updated = await client.patch(
     'people',
     `${path}:updateContact`,
-    { ...body, etag: current.etag },
+    { ...body, etag: current.etag, metadata: { sources } },
     { updatePersonFields: masks.join(','), personFields: PERSON_FIELDS },
   );
   const keys = masks.flatMap(mask => MASK_TO_FIELDS[mask] ?? []);
