@@ -50,8 +50,7 @@ const mcpHeaders = {
 
 function fakeMcpServer() {
   const client = new GoogleClient({
-    apiKey: 'test',
-    baseUrl: 'https://api.vendor.test',
+    credentialEnv: {},
     fetchImpl: async () => {
       throw new Error('network access is not allowed in tests');
     },
@@ -318,7 +317,6 @@ describe('HTTP transport entry point', () => {
     [{ GOOGLE_WORKSPACE_TIMEOUT_MS: 'abc' }, /GOOGLE_WORKSPACE_TIMEOUT_MS/],
     [{ GOOGLE_WORKSPACE_ENABLE_WRITES: 'maybe' }, /GOOGLE_WORKSPACE_ENABLE_WRITES/],
     [{ GOOGLE_WORKSPACE_DISABLED_TOOLS: 'no_such_tool' }, /GOOGLE_WORKSPACE_DISABLED_TOOLS/],
-    [{ GOOGLE_WORKSPACE_BASE_URL: 'http://api.vendor.test' }, /https:\/\//],
   ])('refuses to start with %o', async (env, message) => {
     const result = await runEntry(env);
     expect(result.code).toBe(1);

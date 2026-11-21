@@ -4,10 +4,10 @@ import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_HEADER, GoogleClient } from '../src/google/client.js';
-import { createGoogleGateway, googleGatewayTools, googleToolCatalog } from '../src/gateway.js';
+import { API_KEY_HEADER, GoogleClient, SERVICES } from '../src/google/client.js';
+import { createGoogleGateway, googleGatewayTools, googleToolCatalog, type GatewayJsonObject } from '../src/gateway.js';
 import { GOOGLE_WORKSPACE_TOOLS } from '../src/tools/google.js';
-import { BASE, auditLines, connect, stubFetch, texts } from './helpers.js';
+import { ACCESS, APP, EVENTS, REFRESH, TOKEN_URL, auditLines, connect, stubFetch, texts, tokenAnswer } from './helpers.js';
 
 const originalEnv = { ...process.env };
 let dir: string;
@@ -45,20 +45,27 @@ function headersOf(init?: RequestInit): Record<string, string> {
   return (init?.headers ?? {}) as Record<string, string>;
 }
 
-describe('explicit gateway credentials', () => {
-  it('requires apiKey and baseUrl and ignores the environment', () => {
-    process.env.GOOGLE_WORKSPACE_API_KEY = ENV_KEY;
-    process.env.GOOGLE_WORKSPACE_BASE_URL = BASE;
+/** The form a token request sent. */
+function tokenForm(init?: RequestInit): URLSearchParams {
+  return new URLSearchParams(typeof init?.body === 'string' ? init.body : '');
+}
 
-    expect(() => createGoogleGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
-    expect(() => createGoogleGateway({ apiKey: KEY_A } as never)).toThrow(/requires options\.baseUrl/);
-    expect(() => createGoogleGateway({ apiKey: '  ', baseUrl: BASE })).toThrow(/requires options\.apiKey/);
-    expect(() => createGoogleGateway(undefined as never)).toThrow(/requires options\.apiKey/);
+describe('explicit gateway credentials', () => {
+  it('requires clientId, clientSecret and refreshToken and ignores the environment', () => {
+    process.env.GOOGLE_WORKSPACE_CLIENT_ID = APP.clientId;
+    process.env.GOOGLE_WORKSPACE_CLIENT_SECRET = APP.clientSecret;
+    process.env.GOOGLE_WORKSPACE_REFRESH_TOKEN = ENV_KEY;
+
+    expect(() => createGoogleGateway({ ...APP } as never)).toThrow(/requires options\.refreshToken/);
+    expect(() => createGoogleGateway({ clientId: APP.clientId, refreshToken: KEY_A } as never)).toThrow(/requires options\.clientSecret/);
+    expect(() => createGoogleGateway({ clientSecret: APP.clientSecret, refreshToken: KEY_A } as never)).toThrow(/requires options\.clientId/);
+    expect(() => createGoogleGateway({ ...APP, refreshToken: '  ' })).toThrow(/requires options\.refreshToken/);
+    expect(() => createGoogleGateway(undefined as never)).toThrow(/requires options\.clientSecret/);
   });
 
   it('never reads credential variables from process.env, even when they are set', async () => {
     const reads = new Set<string>();
-    const env = { ...process.env, GOOGLE_WORKSPACE_API_KEY: ENV_KEY, GOOGLE_WORKSPACE_BASE_URL: BASE };
+    const env = { ...process.env, GOOGLE_WORKSPACE_REFRESH_TOKEN: ENV_KEY, GOOGLE_WORKSPACE_CLIENT_SECRET: APP.clientSecret };
     process.env = new Proxy(env, {
       get(target, property, receiver) {
         if (typeof property === 'string') {
@@ -68,42 +75,45 @@ describe('explicit gateway credentials', () => {
       },
     });
 
-    expect(() => createGoogleGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
+    expect(() => createGoogleGateway({ ...APP } as never)).toThrow(/requires options\.refreshToken/);
 
-    const fetchImpl = stubFetch({ [`GET ${BASE}/items/i1`]: { body: { id: 'i1' } } });
-    const gw = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await gw.callTool('get_item', { itemId: 'i1' });
+    const fetchImpl = stubFetch({ [`GET ${EVENTS}/i1`]: { body: { id: 'i1' } } });
+    const gw = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await gw.callTool('get_event', { eventId: 'i1' });
     expect(result.isError).toBeUndefined();
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1])[API_KEY_HEADER]).toBe(KEY_A);
+    expect(tokenForm(fetchImpl.mock.calls[0]?.[1]).get('refresh_token')).toBe(KEY_A);
+    expect(headersOf(fetchImpl.mock.calls[1]?.[1])[API_KEY_HEADER]).toBe(`Bearer ${ACCESS}`);
 
-    expect(reads.has('GOOGLE_WORKSPACE_API_KEY')).toBe(false);
-    expect(reads.has('GOOGLE_WORKSPACE_BASE_URL')).toBe(false);
+    for (const name of ['GOOGLE_WORKSPACE_REFRESH_TOKEN', 'GOOGLE_WORKSPACE_CLIENT_ID', 'GOOGLE_WORKSPACE_CLIENT_SECRET']) {
+      expect(reads.has(name), name).toBe(false);
+    }
   });
 
   it('still reads credentials from the environment in the standalone client', async () => {
-    process.env.GOOGLE_WORKSPACE_API_KEY = ENV_KEY;
-    process.env.GOOGLE_WORKSPACE_BASE_URL = BASE;
-    const fetchImpl = vi.fn(async () => Response.json({})) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
-    await new GoogleClient({ fetchImpl }).get('/items/1');
-    expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)[API_KEY_HEADER]).toBe(ENV_KEY);
+    process.env.GOOGLE_WORKSPACE_CLIENT_ID = APP.clientId;
+    process.env.GOOGLE_WORKSPACE_CLIENT_SECRET = APP.clientSecret;
+    process.env.GOOGLE_WORKSPACE_REFRESH_TOKEN = ENV_KEY;
+    const fetchImpl = stubFetch({ [`GET ${EVENTS}/1`]: { body: {} } });
+    await new GoogleClient({ fetchImpl: fetchImpl as unknown as typeof fetch }).get('calendar', '/calendars/primary/events/1');
+    expect(tokenForm(fetchImpl.mock.calls[0]?.[1] as RequestInit).get('refresh_token')).toBe(ENV_KEY);
   });
 });
 
 describe('per-instance redaction', () => {
   it('redacts each instance’s own key in its tool results', async () => {
-    const a = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: echoingFetch(KEY_A) });
-    const b = createGoogleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: echoingFetch(KEY_B) });
+    const a = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: echoingFetch(KEY_A) });
+    const b = createGoogleGateway({ ...APP, refreshToken: KEY_B, fetchImpl: echoingFetch(KEY_B) });
 
-    const resultA = texts(await a.callTool('get_item', { itemId: 'i1' })).join(' ');
-    const resultB = texts(await b.callTool('get_item', { itemId: 'i1' })).join(' ');
+    const resultA = texts(await a.callTool('get_event', { eventId: 'i1' })).join(' ');
+    const resultB = texts(await b.callTool('get_event', { eventId: 'i1' })).join(' ');
     // The echoing error body is never read into the result; the key is not there in any form.
     expect(resultA).not.toContain(KEY_A);
     expect(resultB).not.toContain(KEY_B);
   });
 
   it('keeps redactors separate: an instance holds only its own secrets', () => {
-    const a = new GoogleClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
-    const b = new GoogleClient({ apiKey: KEY_B, baseUrl: BASE, credentialEnv: {} });
+    const a = new GoogleClient({ ...APP, refreshToken: KEY_A, credentialEnv: {} });
+    const b = new GoogleClient({ ...APP, refreshToken: KEY_B, credentialEnv: {} });
     expect(a.redactor.hasSecret(KEY_A)).toBe(true);
     expect(a.redactor.hasSecret(KEY_B)).toBe(false);
     expect(b.redactor.hasSecret(KEY_B)).toBe(true);
@@ -114,9 +124,9 @@ describe('per-instance redaction', () => {
 
   it('does not accumulate keys of earlier instances', () => {
     for (let index = 0; index < 200; index += 1) {
-      createGoogleGateway({ apiKey: `short-lived-key-${index}`, baseUrl: BASE });
+      createGoogleGateway({ ...APP, refreshToken: `short-lived-key-${index}` });
     }
-    const fresh = new GoogleClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
+    const fresh = new GoogleClient({ ...APP, refreshToken: KEY_A, credentialEnv: {} });
     expect(fresh.redactor.redact('short-lived-key-7')).toBe('short-lived-key-7');
   });
 
@@ -126,10 +136,10 @@ describe('per-instance redaction', () => {
       vi.fn(async () => {
         throw new TypeError(`connection refused while sending ${key}`);
       }) as unknown as typeof fetch;
-    const a = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: failing(KEY_A), maxAttempts: 1 });
-    const b = createGoogleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: failing(KEY_B), maxAttempts: 1 });
-    await a.callTool('get_item', { itemId: 'i1' }, { requestId: 'a' });
-    await b.callTool('get_item', { itemId: 'i1' }, { requestId: 'b' });
+    const a = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: failing(KEY_A), maxAttempts: 1 });
+    const b = createGoogleGateway({ ...APP, refreshToken: KEY_B, fetchImpl: failing(KEY_B), maxAttempts: 1 });
+    await a.callTool('get_event', { eventId: 'i1' }, { requestId: 'a' });
+    await b.callTool('get_event', { eventId: 'i1' }, { requestId: 'b' });
 
     const errors = auditLines(process.env.GOOGLE_WORKSPACE_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
@@ -139,15 +149,15 @@ describe('per-instance redaction', () => {
   });
 
   it('redacts with the server client’s key on the MCP path', async () => {
-    const tool = GOOGLE_WORKSPACE_TOOLS.find(t => t.name === 'google_get_item')!;
+    const tool = GOOGLE_WORKSPACE_TOOLS.find(t => t.name === 'google_get_event')!;
     const original = tool.handler;
     tool.handler = async () => {
-      throw new Error('failed with test-api-key');
+      throw new Error(`failed with ${REFRESH}`);
     };
     try {
       const { mcpClient } = await connect();
-      const result = await mcpClient.callTool({ name: 'google_get_item', arguments: { itemId: 'i1' } });
-      expect(texts(result).join(' ')).not.toContain('test-api-key');
+      const result = await mcpClient.callTool({ name: 'google_get_event', arguments: { eventId: 'i1' } });
+      expect(texts(result).join(' ')).not.toContain(REFRESH);
     } finally {
       tool.handler = original;
     }
@@ -157,8 +167,8 @@ describe('per-instance redaction', () => {
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc') as () => void;
     let gateway: ReturnType<typeof createGoogleGateway> | undefined = createGoogleGateway({
-      apiKey: fakeKey('collectable'),
-      baseUrl: BASE,
+      ...APP,
+      refreshToken: fakeKey('collectable'),
     });
     const ref = new WeakRef(gateway);
     gateway = undefined;
@@ -170,10 +180,45 @@ describe('per-instance redaction', () => {
   });
 });
 
+const SHEET_ID = '1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd';
+const DOC_ID = '1ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210zyxw';
+
+/** The value of each path placeholder in the sample inputs (and the defaults the tools use). */
+const PLACEHOLDERS: Record<string, string> = {
+  calendarId: 'primary',
+  eventId: 'ev1',
+  spreadsheetId: SHEET_ID,
+  range: 'Ark1!A1:B2',
+  documentId: DOC_ID,
+  contactId: 'c42',
+  taskList: '@default',
+  task: 't1',
+};
+
 /** Sample input per tool, used to check each tool's declared upstream requests. */
-const SAMPLE_INPUTS: Record<string, Record<string, string>> = {
-  get_item: { itemId: 'i1' },
-  create_item: { name: 'New item' },
+const SAMPLE_INPUTS: Record<string, Record<string, unknown>> = {
+  check_connection: {},
+  list_calendars: {},
+  list_events: { timeMin: '2026-11-01T00:00:00+01:00' },
+  get_event: { eventId: 'ev1' },
+  create_event: { summary: 'Møde', start: '2026-11-24T09:00:00+01:00', end: '2026-11-24T10:00:00+01:00' },
+  update_event: { eventId: 'ev1', summary: 'Nyt navn' },
+  get_spreadsheet: { spreadsheet: SHEET_ID },
+  read_range: { spreadsheet: SHEET_ID, range: 'Ark1!A1:B2' },
+  update_range: { spreadsheet: SHEET_ID, range: 'Ark1!A1:B2', values: [['a', 1]] },
+  append_rows: { spreadsheet: SHEET_ID, range: 'Ark1!A1:B2', rows: [['a', 1]] },
+  create_spreadsheet: { title: 'Budget' },
+  get_document: { document: DOC_ID },
+  append_text: { document: DOC_ID, text: 'Hej' },
+  create_document: { title: 'Notat', text: 'Hej' },
+  list_contacts: {},
+  search_contacts: { query: 'Anna' },
+  create_contact: { givenName: 'Anna' },
+  update_contact: { contact: 'people/c42', givenName: 'Anna' },
+  list_task_lists: {},
+  list_tasks: {},
+  create_task: { title: 'Ring til kunden' },
+  update_task: { task: 't1', completed: true },
 };
 
 describe('tool catalog', () => {
@@ -227,19 +272,25 @@ describe('tool catalog', () => {
     for (const entry of googleToolCatalog) {
       const input = SAMPLE_INPUTS[entry.name];
       expect(input, `sample input for ${entry.name}`).toBeDefined();
-      const fetchImpl = vi.fn(async () => Response.json({ ok: true }));
-      const gw = createGoogleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
-      const result = await gw.callTool(entry.name, input!);
+      const fetchImpl = vi.fn(async (url: string) =>
+        String(url).startsWith(TOKEN_URL) ? Response.json(tokenAnswer()) : Response.json({ etag: '"e1"', documentId: DOC_ID }),
+      );
+      const gw = createGoogleGateway({ ...APP, refreshToken: KEY_A, fetchImpl: fetchImpl as unknown as typeof fetch });
+      const result = await gw.callTool(entry.name, input as GatewayJsonObject);
       expect(result.isError, texts(result).join(' ')).toBeUndefined();
 
       const declared = entry.upstream.map(op => ({
+        service: op.service,
         method: op.method,
-        path: op.path.replace(/\{(\w+)\}/g, (_, name: string) => encodeURIComponent(input![name] ?? '')),
+        path: op.path.replace(/\{(\w+)\}/g, (_, name: string) => encodeURIComponent(PLACEHOLDERS[name] ?? '')),
       }));
-      const made = (fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>).map(([url, init]) => ({
-        method: init.method,
-        path: new URL(url).pathname.slice(new URL(BASE).pathname.length),
-      }));
+      const made = (fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>)
+        .filter(([url]) => !String(url).startsWith(TOKEN_URL))
+        .map(([url, init]) => {
+          const [service, root] = Object.entries(SERVICES).find(([, base]) => String(url).startsWith(`${base}/`))!;
+          return { service, method: init.method ?? 'GET', path: new URL(url).pathname.slice(new URL(root).pathname.length) };
+        });
+      expect(made.length, entry.name).toBeGreaterThan(0);
       for (const request of made) {
         expect(declared, `${entry.name} made ${request.method} ${request.path}`).toContainEqual(request);
       }

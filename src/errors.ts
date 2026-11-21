@@ -51,7 +51,7 @@ const BASE_PATTERNS: readonly RegExp[] = [
   headerPattern('x-api-key'),
   // Any scheme word (Bearer, Basic, Token, ...) followed by the credentials.
   /["']?authorization["']?\s*[:=]\s*["']?(?:[a-z][\w-]*\s+)?[^"',\s}]+/gi,
-  /(apiKey|GOOGLE_WORKSPACE_API_KEY|api_key|access_token)["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
+  /(apiKey|GOOGLE_WORKSPACE_CLIENT_SECRET|GOOGLE_WORKSPACE_REFRESH_TOKEN|client_secret|refresh_token|id_token|api_key|access_token)["']?\s*[:=]\s*["']?[^"',\s}]+/gi,
 ];
 
 /**
@@ -62,7 +62,17 @@ const BASE_PATTERNS: readonly RegExp[] = [
  * runs several tenants in one process never mixes their keys, and a tenant's
  * key is released with its instance. There is no process-wide registry.
  */
+/** The URL-encoded form of a value; a lone surrogate (which encodeURIComponent refuses) is encoded as U+FFFD. */
+function uriForm(value: string): string {
+  try {
+    return encodeURIComponent(value);
+  } catch {
+    return encodeURIComponent(value.replace(/[\uD800-\uDFFF]/g, '�'));
+  }
+}
+
 export class SecretRedactor {
+  private readonly values = new Set<string>();
   private readonly secrets = new Set<string>();
   private readonly fragments = new Set<string>();
   private readonly patterns: RegExp[] = [...BASE_PATTERNS];
@@ -72,12 +82,24 @@ export class SecretRedactor {
     if (!value || value.length < MIN_SECRET_LENGTH) {
       return this;
     }
-    for (const form of new Set([value, encodeURIComponent(value), JSON.stringify(value).slice(1, -1)])) {
+    this.values.add(value);
+    for (const form of new Set([value, uriForm(value), JSON.stringify(value).slice(1, -1)])) {
       this.secrets.add(form);
       for (let i = 0; i + FRAGMENT_LENGTH <= form.length; i += 1) {
         this.fragments.add(form.slice(i, i + FRAGMENT_LENGTH));
       }
     }
+    return this;
+  }
+
+  /** Stop redacting this value (an access token that has expired). The other secrets stay. */
+  removeSecret(value: string): this {
+    if (!this.values.delete(value)) return this;
+    const remaining = [...this.values];
+    this.values.clear();
+    this.secrets.clear();
+    this.fragments.clear();
+    for (const secret of remaining) this.addSecret(secret);
     return this;
   }
 
@@ -157,12 +179,15 @@ function applyPatterns(value: string, patterns: readonly RegExp[]): string {
   );
 }
 
-/** Our own guidance per HTTP status. Replace or extend with the vendor's documented statuses. */
+/** Our own guidance per HTTP status (Google's documented statuses, https://cloud.google.com/apis/design/errors). */
 const STATUS_HINTS: Record<number, string> = {
-  401: 'The API key was rejected (invalid or expired). The server operator must renew GOOGLE_WORKSPACE_API_KEY.',
-  403: 'The API key has no access to this resource. Retrying will not help.',
-  404: 'The object was not found, or the API key has no access to it. Check the ids.',
-  429: 'The upstream API is throttling requests. Wait and retry later.',
+  400: 'Google did not accept the request. Check the values given.',
+  401: 'Google did not accept the access. The account must give access again.',
+  403: 'The account has no access to this, or the access given does not cover it. Retrying will not help.',
+  404: 'Not found, or the account has no access to it. Check the id or the link.',
+  409: 'The object was changed by someone else meanwhile. Read it again and retry.',
+  412: 'The object was changed by someone else meanwhile. Read it again and retry.',
+  429: 'Google is limiting the number of requests. Wait and retry later.',
 };
 
 /**

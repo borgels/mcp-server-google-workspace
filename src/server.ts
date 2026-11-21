@@ -22,7 +22,7 @@ export function getDefaultClient(): GoogleClient {
 
 export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer({
-    name: 'google',
+    name: 'google-workspace',
     version: PACKAGE_VERSION,
   });
 

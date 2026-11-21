@@ -137,13 +137,13 @@ function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
 }
 
 /** Identifier fields logged in clear text: they are opaque ids, not secrets. Extend per tool. */
-const ID_FIELDS = ['itemId'] as const;
+const ID_FIELDS = ['calendarId', 'eventId', 'spreadsheet', 'document', 'contact', 'taskList', 'task'] as const;
 
 /** Free-text fields are hashed so user-written text does not land in the log. */
-const FREE_TEXT_FIELDS = ['name', 'query'] as const;
+const FREE_TEXT_FIELDS = ['query', 'summary', 'title', 'range'] as const;
 
 /** Write payload objects: only their field names are logged. */
-const PAYLOAD_FIELDS = ['body', 'patch'] as const;
+const PAYLOAD_FIELDS = ['organization'] as const;
 
 /** Build the audit `target` for a tool input. Values not listed above are not logged. */
 export function auditTarget(input: unknown): Record<string, unknown> | undefined {
