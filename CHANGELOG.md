@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- A redirect from a Google API or the token endpoint, which is never
+  followed, now also gives its error result `failure: { httpStatus,
+  requestId? }`, with the same checks as an HTTP error. The text is
+  unchanged.
+
 ## 0.2.0
 
 - Gateway error results carry failure metadata: when the upstream API
