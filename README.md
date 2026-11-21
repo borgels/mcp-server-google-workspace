@@ -1,6 +1,6 @@
-# mcp-server-example
+# mcp-server-google-workspace
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for the Example API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Example API and, when enabled, write to it.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for the Google API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Google API and, when enabled, write to it.
 
 > This is an independent, unofficial project. It is not developed, endorsed or supported by &lt;Vendor&gt;.
 
@@ -9,32 +9,26 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for the Examp
 - Two transports: stdio for local clients, stateless streamable HTTP for containers and gateways.
 - Embeddable: the `./gateway` export exposes the same tools, validation, policy and audit to a host application.
 
-<!-- template:start -->
-## Using this template
-
-This repository is a GitHub template for TypeScript MCP servers: a minimal working server for a fictional upstream API (one read tool, one write tool) with hardened transports, client, policy, audit, tests and release workflows. After creating a repository from it, run `node scripts/rename.mjs <name> [PREFIX]` and follow [docs/NEW-SERVER.md](docs/NEW-SERVER.md). The rename removes this section; the checklist stays. Nothing is published from the template repository, or from a generated repository before the rename.
-<!-- template:end -->
-
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `example_get_item` | Fetch one item by id. |
-| `example_create_item` *(write)* | Create an item. |
+| `google_get_item` | Fetch one item by id. |
+| `google_create_item` *(write)* | Create an item. |
 
 ## Quick start
 
-Requires Node.js 22 or later and an API key for the Example API.
+Requires Node.js 22 or later and an API key for the Google API.
 
 ```bash
-npx <npm-package>
+npx @borgels/mcp-server-google-workspace
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/borgels/mcp-server-example.git
-cd mcp-server-example
+git clone https://github.com/borgels/mcp-server-google-workspace.git
+cd mcp-server-google-workspace
 npm ci
 npm run build
 ```
@@ -42,9 +36,9 @@ npm run build
 Claude Code:
 
 ```bash
-claude mcp add example \
-  --env EXAMPLE_API_KEY=<key> --env EXAMPLE_BASE_URL=<base url> \
-  -- npx -y <npm-package>
+claude mcp add google \
+  --env GOOGLE_WORKSPACE_API_KEY=<key> --env GOOGLE_WORKSPACE_BASE_URL=<base url> \
+  -- npx -y @borgels/mcp-server-google-workspace
 ```
 
 Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio servers:
@@ -52,12 +46,12 @@ Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio
 ```json
 {
   "mcpServers": {
-    "example": {
+    "google": {
       "command": "npx",
-      "args": ["-y", "<npm-package>"],
+      "args": ["-y", "@borgels/mcp-server-google-workspace"],
       "env": {
-        "EXAMPLE_API_KEY": "<key>",
-        "EXAMPLE_BASE_URL": "<base url>"
+        "GOOGLE_WORKSPACE_API_KEY": "<key>",
+        "GOOGLE_WORKSPACE_BASE_URL": "<base url>"
       }
     }
   }
@@ -66,21 +60,21 @@ Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio
 
 ### Docker and HTTP
 
-Images are published to `ghcr.io/borgels/mcp-server-example`: `latest` and the commit SHA from `main`, and `vX.Y.Z` for release tags. The container serves streamable HTTP at `/mcp` on port 3000, plus an unauthenticated `GET /healthz`.
+Images are published to `ghcr.io/borgels/mcp-server-google-workspace`: `latest` and the commit SHA from `main`, and `vX.Y.Z` for release tags. The container serves streamable HTTP at `/mcp` on port 3000, plus an unauthenticated `GET /healthz`.
 
 ```bash
 TOKEN=$(openssl rand -hex 32); echo "$TOKEN"
-docker run -d --name example-mcp -p 127.0.0.1:3000:3000 \
-  -e EXAMPLE_API_KEY=<key> \
-  -e EXAMPLE_BASE_URL=<base url> \
+docker run -d --name google-mcp -p 127.0.0.1:3000:3000 \
+  -e GOOGLE_WORKSPACE_API_KEY=<key> \
+  -e GOOGLE_WORKSPACE_BASE_URL=<base url> \
   -e MCP_HTTP_TOKEN="$TOKEN" \
-  ghcr.io/borgels/mcp-server-example:latest
+  ghcr.io/borgels/mcp-server-google-workspace:latest
 
-claude mcp add --transport http example http://127.0.0.1:3000/mcp \
+claude mcp add --transport http google http://127.0.0.1:3000/mcp \
   --header "Authorization: Bearer $TOKEN"
 ```
 
-To keep an audit log in the container, mount a writable directory and point `EXAMPLE_AUDIT_LOG` into it (e.g. `-v example-audit:/audit -e EXAMPLE_AUDIT_LOG=/audit/audit.jsonl`); the image runs as the `node` user and `/app` is not writable.
+To keep an audit log in the container, mount a writable directory and point `GOOGLE_WORKSPACE_AUDIT_LOG` into it (e.g. `-v google-audit:/audit -e GOOGLE_WORKSPACE_AUDIT_LOG=/audit/audit.jsonl`); the image runs as the `node` user and `/app` is not writable.
 
 Clients send `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server will not start on a non-loopback address without a token of at least 32 characters. It does not terminate TLS; run it behind a reverse proxy or gateway that does.
 
@@ -92,20 +86,20 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXAMPLE_API_KEY` | – | **Required.** API key. |
-| `EXAMPLE_BASE_URL` | – | **Required.** Base URL of the API. Must be `https` (loopback `http` is allowed for local mocks). |
-| `EXAMPLE_ALLOW_CUSTOM_BASE_URL` | `false` | Allow a base URL outside the hosts the server expects, when such a list is configured. |
-| `EXAMPLE_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
-| `EXAMPLE_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
-| `EXAMPLE_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |
+| `GOOGLE_WORKSPACE_API_KEY` | – | **Required.** API key. |
+| `GOOGLE_WORKSPACE_BASE_URL` | – | **Required.** Base URL of the API. Must be `https` (loopback `http` is allowed for local mocks). |
+| `GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL` | `false` | Allow a base URL outside the hosts the server expects, when such a list is configured. |
+| `GOOGLE_WORKSPACE_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
+| `GOOGLE_WORKSPACE_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
+| `GOOGLE_WORKSPACE_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |
 
 ### Access control
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXAMPLE_ENABLE_WRITES` | `false` | Enable the write tools. |
-| `EXAMPLE_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `example_` prefix. |
-| `EXAMPLE_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text hashed, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
+| `GOOGLE_WORKSPACE_ENABLE_WRITES` | `false` | Enable the write tools. |
+| `GOOGLE_WORKSPACE_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `google_` prefix. |
+| `GOOGLE_WORKSPACE_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text hashed, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport
 
@@ -126,17 +120,17 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 A host application can run the tools in-process instead of over MCP:
 
 ```ts
-import { createExampleGateway, exampleToolCatalog } from '<npm-package>/gateway';
+import { createGoogleGateway, googleToolCatalog } from '@borgels/mcp-server-google-workspace/gateway';
 
-const gateway = createExampleGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
-const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'user@example.test' });
+const gateway = createGoogleGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
+const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'user@google.test' });
 ```
 
-- **Explicit credentials.** `apiKey` and `baseUrl` are required; a missing value throws when the gateway is created. A gateway never reads `EXAMPLE_API_KEY` or `EXAMPLE_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
+- **Explicit credentials.** `apiKey` and `baseUrl` are required; a missing value throws when the gateway is created. A gateway never reads `GOOGLE_WORKSPACE_API_KEY` or `GOOGLE_WORKSPACE_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
 - **Several tenants in one process.** Create one gateway per set of credentials. Each instance redacts error text, tool results and audit records with its own key only; no secret is kept in a process-wide registry, and a dropped instance releases its key.
-- **Instance policy from the host.** Pass `policy` to `createExampleGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `EXAMPLE_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `EXAMPLE_ENABLE_WRITES`, `EXAMPLE_DISABLED_TOOLS`, `EXAMPLE_AUDIT_LOG` or `EXAMPLE_ALLOW_CUSTOM_BASE_URL`, so tenants in one process can have different settings. Without `policy` the instance uses the environment, like the MCP server. Each call runs in a scope of its own, so a call made from inside another instance's call never inherits its policy, sink or redactor, and every audit record is redacted as a whole with the instance's own key before the sink sees it. The limits (`EXAMPLE_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
+- **Instance policy from the host.** Pass `policy` to `createGoogleGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `GOOGLE_WORKSPACE_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `GOOGLE_WORKSPACE_ENABLE_WRITES`, `GOOGLE_WORKSPACE_DISABLED_TOOLS`, `GOOGLE_WORKSPACE_AUDIT_LOG` or `GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL`, so tenants in one process can have different settings. Without `policy` the instance uses the environment, like the MCP server. Each call runs in a scope of its own, so a call made from inside another instance's call never inherits its policy, sink or redactor, and every audit record is redacted as a whole with the instance's own key before the sink sees it. The limits (`GOOGLE_WORKSPACE_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
 - **Result format.** A successful `callTool` result has `structuredContent` and one text block: a short summary, a blank line, and the same data as compact JSON, as the MCP specification recommends (many clients read only the text). The JSON is built from the redacted result, so it holds exactly `structuredContent`. An error result has only its text.
-- **Tool catalog.** `exampleToolCatalog` is a frozen list of every tool: `name` (without the `example_` prefix), `title`, `description`, `riskLevel` (`read`, `write` or `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (true when a tool can read more than its name says, so a host gives it only to roles that may read everything) and `upstream`, the API requests the tool may make (`access`, `method` and path template). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `exampleGatewayTools` holds the same definitions without `upstream` and `broad`; `gateway.tools` lists those enabled on the instance.
+- **Tool catalog.** `googleToolCatalog` is a frozen list of every tool: `name` (without the `google_` prefix), `title`, `description`, `riskLevel` (`read`, `write` or `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (true when a tool can read more than its name says, so a host gives it only to roles that may read everything) and `upstream`, the API requests the tool may make (`access`, `method` and path template). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `googleGatewayTools` holds the same definitions without `upstream` and `broad`; `gateway.tools` lists those enabled on the instance.
 
 ## Threat model
 
@@ -199,7 +193,7 @@ on as the API returned them.
 - **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway that decides which users may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
 - **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
-- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `EXAMPLE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
+- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `GOOGLE_WORKSPACE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
 - **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
@@ -220,8 +214,8 @@ Project layout:
 
 | Path | Contents |
 |---|---|
-| `src/tools/example.ts` | Shared tool table (MCP and gateway), policy and audit wrapper. |
-| `src/example/` | Upstream client, API calls, policy, audit, tool annotations. |
+| `src/tools/google.ts` | Shared tool table (MCP and gateway), policy and audit wrapper. |
+| `src/google/` | Upstream client, API calls, policy, audit, tool annotations. |
 | `src/transports/` | stdio and HTTP entry points; HTTP auth, origin and host checks. |
 | `src/gateway.ts` | Embeddable entry point (`./gateway` export). |
 | `src/config-env.ts` | Validated environment readers. |

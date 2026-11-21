@@ -5,12 +5,12 @@ import {
   UNTRUSTED_CONTENT_NOTE,
   UNTRUSTED_RESULT_NOTE,
   WRITE_TOOL_ANNOTATIONS,
-} from '../example/annotations.js';
-import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../example/audit.js';
-import { readOnlyClient, type UpstreamClient } from '../example/client.js';
+} from '../google/annotations.js';
+import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../google/audit.js';
+import { readOnlyClient, type UpstreamClient } from '../google/client.js';
 import { formatUnknownError, type SecretRedactor } from '../errors.js';
-import { createItem, getItem } from '../example/items.js';
-import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../example/policy.js';
+import { createItem, getItem } from '../google/items.js';
+import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../google/policy.js';
 
 const MAX_ID_LENGTH = 200;
 const idSchema = z.string().trim().min(1).max(MAX_ID_LENGTH);
@@ -29,7 +29,7 @@ export interface UpstreamOperation {
   path: string;
 }
 
-/** A client that carries the redactor of its instance (ExampleClient does). */
+/** A client that carries the redactor of its instance (GoogleClient does). */
 export interface RedactingClient extends UpstreamClient {
   readonly redactor: SecretRedactor;
 }
@@ -39,7 +39,7 @@ export interface RedactingClient extends UpstreamClient {
  * point: same input schema, same handler, same policy and audit path.
  */
 export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
-  /** MCP tool name (`example_*`). The gateway exposes it without the prefix. */
+  /** MCP tool name (`google_*`). The gateway exposes it without the prefix. */
   name: string;
   title: string;
   description: string;
@@ -78,10 +78,10 @@ function defineTool<S extends z.ZodRawShape>(definition: Omit<ToolDefinition<S>,
   } as unknown as ToolDefinition;
 }
 
-export const EXAMPLE_TOOLS: ToolDefinition[] = [
+export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
   defineTool({
-    name: 'example_get_item',
-    title: 'Get Item (Example)',
+    name: 'google_get_item',
+    title: 'Get Item (Google)',
     description: 'Fetch one item by id, optionally with its history.',
     inputShape: {
       itemId: idSchema.describe('Item id.'),
@@ -97,8 +97,8 @@ export const EXAMPLE_TOOLS: ToolDefinition[] = [
     handler: async (client, input) => getItem(client, input),
   }),
   defineTool({
-    name: 'example_create_item',
-    title: 'Create Item (Example)',
+    name: 'google_create_item',
+    title: 'Create Item (Google)',
     description:
       'Create a new item. Requires write access on this instance; confirm with the user before creating.',
     inputShape: {
@@ -114,12 +114,12 @@ export const EXAMPLE_TOOLS: ToolDefinition[] = [
 ];
 
 export function findTool(name: string): ToolDefinition | undefined {
-  return EXAMPLE_TOOLS.find(tool => tool.name === name);
+  return GOOGLE_WORKSPACE_TOOLS.find(tool => tool.name === name);
 }
 
 /** Validate the tool policy environment. Cheap; runs for every server instance. */
 export function validateToolConfig(): void {
-  validatePolicyConfig(EXAMPLE_TOOLS.map(tool => tool.name));
+  validatePolicyConfig(GOOGLE_WORKSPACE_TOOLS.map(tool => tool.name));
 }
 
 /**
@@ -133,9 +133,9 @@ export function validateStartupConfig(): void {
   assertAuditLogWritable();
 }
 
-/** Tools enabled on this instance (EXAMPLE_DISABLED_TOOLS removes them entirely). */
+/** Tools enabled on this instance (GOOGLE_WORKSPACE_DISABLED_TOOLS removes them entirely). */
 export function enabledTools(): ToolDefinition[] {
-  return EXAMPLE_TOOLS.filter(tool => !isToolDisabled(tool.name));
+  return GOOGLE_WORKSPACE_TOOLS.filter(tool => !isToolDisabled(tool.name));
 }
 
 export function registerTools(server: McpServer, client: RedactingClient): void {
