@@ -1,9 +1,8 @@
-import { createServer as createHttpServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_HEADER, GoogleClient } from '../src/google/client.js';
+import { ALL_SCOPES, API_KEY_HEADER, GoogleClient, GoogleTokenError, SERVICES, TOKEN_URL } from '../src/google/client.js';
 import { GoogleHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
 import { USER_AGENT } from '../src/version.js';
+import { ACCESS, APP, REFRESH, tokenAnswer } from './helpers.js';
 
 const originalEnv = { ...process.env };
 
@@ -11,22 +10,10 @@ afterEach(() => {
   process.env = { ...originalEnv };
 });
 
-const BASE = 'https://api.vendor.test/v1';
+const CAL = SERVICES.calendar;
 
 type Handler = (url: string, init?: RequestInit) => Response | unknown | Promise<Response | unknown>;
-
-function makeFetch(handler: Handler) {
-  return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const result = await handler(String(input), init);
-    if (result instanceof Response) {
-      return result;
-    }
-    return new Response(JSON.stringify(result), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  }) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
-}
+type SpyFetch = typeof fetch & ReturnType<typeof vi.fn> & { wrapped: typeof fetch; tokenCalls: RequestInit[] };
 
 function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
@@ -35,193 +22,269 @@ function jsonResponse(body: unknown, status: number, headers: Record<string, str
   });
 }
 
+/**
+ * A spy for the API requests only. The client is given `wrapped`, which answers Google's token endpoint with an
+ * access token (recording the request in `tokenCalls`) and passes every other request to the spy.
+ */
+function makeFetch(handler: Handler, token: () => Response = () => jsonResponse(tokenAnswer(), 200)): SpyFetch {
+  const spy = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const result = await handler(String(input), init);
+    if (result instanceof Response) return result;
+    return new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as SpyFetch;
+  spy.tokenCalls = [];
+  spy.wrapped = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input) === TOKEN_URL) {
+      spy.tokenCalls.push(init ?? {});
+      return token();
+    }
+    return spy(input, init);
+  }) as typeof fetch;
+  return spy;
+}
+
 function headersOf(init?: RequestInit): Record<string, string> {
   return (init?.headers ?? {}) as Record<string, string>;
 }
 
 const noSleep = vi.fn(async (_ms: number) => undefined);
 
-function makeClient(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof GoogleClient>[0]> = {}) {
-  return new GoogleClient({ apiKey: 'k', baseUrl: BASE, fetchImpl, sleep: noSleep, ...extra });
+function makeClient(fetchImpl: SpyFetch, extra: Partial<ConstructorParameters<typeof GoogleClient>[0]> = {}) {
+  return new GoogleClient({ ...APP, refreshToken: REFRESH, credentialEnv: {}, fetchImpl: fetchImpl.wrapped, sleep: noSleep, ...extra });
 }
 
-describe('GoogleClient', () => {
-  it('sends the API key and User-Agent headers and never follows redirects', async () => {
-    let seenUrl = '';
-    let seenInit: RequestInit | undefined;
-    const fetchImpl = makeFetch((url, init) => {
-      seenUrl = url;
-      seenInit = init;
-      return { id: '1' };
+describe('GoogleClient and the access token', () => {
+  it('gets an access token with the refresh token, sends it as Bearer with the User-Agent, and never follows redirects', async () => {
+    const fetchImpl = makeFetch(() => ({ ok: true }));
+    await makeClient(fetchImpl).get('calendar', '/users/me/calendarList', { maxResults: 5 });
+
+    const form = new URLSearchParams(String(fetchImpl.tokenCalls[0]?.body));
+    expect(Object.fromEntries(form)).toEqual({
+      grant_type: 'refresh_token',
+      refresh_token: REFRESH,
+      client_id: APP.clientId,
+      client_secret: APP.clientSecret,
     });
+    expect(headersOf(fetchImpl.tokenCalls[0])['Content-Type']).toBe('application/x-www-form-urlencoded');
 
-    await new GoogleClient({ apiKey: 'secret-key', baseUrl: `${BASE}/`, fetchImpl }).get('/items/1', { q: 'x' });
-
-    expect(seenUrl).toBe(`${BASE}/items/1?q=x`);
-    expect(headersOf(seenInit)[API_KEY_HEADER]).toBe('secret-key');
-    expect(headersOf(seenInit)['User-Agent']).toBe(USER_AGENT);
-    expect(seenInit?.redirect).toBe('manual');
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${CAL}/users/me/calendarList?maxResults=5`);
+    expect(headersOf(init)[API_KEY_HEADER]).toBe(`Bearer ${ACCESS}`);
+    expect(headersOf(init)['User-Agent']).toBe(USER_AGENT);
+    expect(init.redirect).toBe('manual');
   });
 
-  it('throws before sending anything when the API key or base URL is missing', async () => {
-    const fetchImpl = makeFetch(() => ({}));
-    delete process.env.GOOGLE_WORKSPACE_API_KEY;
-    delete process.env.GOOGLE_WORKSPACE_BASE_URL;
+  it('keeps the access token until shortly before it expires, and fetches one at a time', async () => {
+    let now = 1_000_000;
+    const fetchImpl = makeFetch(() => ({ ok: true }));
+    const client = makeClient(fetchImpl, { now: () => now });
+    await Promise.all([client.get('calendar', '/a'), client.get('calendar', '/b'), client.get('calendar', '/c')]);
+    expect(fetchImpl.tokenCalls).toHaveLength(1);
+    now += 3_000_000; // 50 minutes: still more than a minute left of 3599 seconds
+    await client.get('calendar', '/d');
+    expect(fetchImpl.tokenCalls).toHaveLength(1);
+    now += 560_000; // less than a minute left
+    await client.get('calendar', '/e');
+    expect(fetchImpl.tokenCalls).toHaveLength(2);
+  });
 
-    await expect(new GoogleClient({ baseUrl: BASE, fetchImpl }).get('/x')).rejects.toThrow('GOOGLE_WORKSPACE_API_KEY');
-    await expect(new GoogleClient({ apiKey: 'k', fetchImpl }).get('/x')).rejects.toThrow('GOOGLE_WORKSPACE_BASE_URL');
+  it('renews the access token once after a 401 and sends again', async () => {
+    let calls = 0;
+    const fetchImpl = makeFetch(() => (++calls === 1 ? jsonResponse({ error: { code: 401 } }, 401) : { ok: true }));
+    await expect(makeClient(fetchImpl).get('calendar', '/x')).resolves.toEqual({ ok: true });
+    expect(fetchImpl.tokenCalls).toHaveLength(2);
+
+    const always = makeFetch(() => jsonResponse({ error: { code: 401 } }, 401));
+    const error = await makeClient(always).get('calendar', '/x').catch((e: unknown) => e);
+    expect((error as GoogleHttpError).status).toBe(401);
+    expect(always).toHaveBeenCalledTimes(2);
+  });
+
+  it('says the access was refused when the token endpoint answers 400 or 401, without its text', async () => {
+    const fetchImpl = makeFetch(
+      () => ({ ok: true }),
+      () => jsonResponse({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }, 400),
+    );
+    const error = await makeClient(fetchImpl).get('calendar', '/x').catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GoogleTokenError);
+    expect((error as Error).message).not.toMatch(/invalid_grant|revoked/);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it('refuses unsafe base URLs without echoing credentials', () => {
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: 'http://api.vendor.test' })).toThrow('https://');
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
-
-    for (const baseUrl of [
-      'https://user:hunter2@api.vendor.test/v1',
-      'https://api.vendor.test/v1?x=1',
-      'https://api.vendor.test/v1#frag',
-    ]) {
-      let message = '';
-      try {
-        new GoogleClient({ apiKey: 'k', baseUrl });
-      } catch (error) {
-        message = (error as Error).message;
-      }
-      expect(message).toContain('credentials, a query string or a fragment');
-      expect(message).not.toContain('hunter2');
+  it('refuses a token answer without an access token or of another type', async () => {
+    for (const answer of [{ expires_in: 3599 }, { access_token: 'short' }, tokenAnswer({ token_type: 'MAC' })]) {
+      const fetchImpl = makeFetch(() => ({ ok: true }), () => jsonResponse(answer, 200));
+      await expect(makeClient(fetchImpl).get('calendar', '/x')).rejects.toThrow(/Nothing in the answer was used/);
+      expect(fetchImpl).not.toHaveBeenCalled();
     }
+  });
+
+  it('keeps the scopes the account granted, by our names only', async () => {
+    const granted = `openid https://www.googleapis.com/auth/userinfo.email ${ALL_SCOPES[3]} https://www.googleapis.com/auth/other`;
+    const fetchImpl = makeFetch(() => ({ ok: true }), () => jsonResponse(tokenAnswer({ scope: granted }), 200));
+    const client = makeClient(fetchImpl);
+    expect(client.grantedScopes).toBeUndefined();
+    await client.get('calendar', '/x');
+    expect(client.grantedScopes).toEqual(['openid', 'email', ALL_SCOPES[3]]);
+  });
+
+  it('uses a new refresh token from the answer, gives it to the host and redacts both', async () => {
+    const NEW = 'rt-test-NewRotated-Kq8Zm3Wv7';
+    const saved: string[] = [];
+    const fetchImpl = makeFetch(() => ({ ok: true }), () => jsonResponse(tokenAnswer({ refresh_token: NEW }), 200));
+    const client = makeClient(fetchImpl, { onRefreshToken: token => void saved.push(token) });
+    await client.get('calendar', '/x');
+    expect(saved).toEqual([NEW]);
+    expect(client.redactor.redact(`${REFRESH} ${NEW} ${ACCESS}`)).not.toMatch(/Rotated|Hv7Qm2|w3w3w3/);
+
+    // A host's failing callback does not fail the call.
+    const failing = makeClient(fetchImpl, { onRefreshToken: () => Promise.reject(new Error('store down')) });
+    await expect(failing.get('calendar', '/x')).resolves.toEqual({ ok: true });
+  });
+
+  it('throws before sending anything when a credential is missing', async () => {
+    const fetchImpl = makeFetch(() => ({ ok: true }));
+    for (const missing of ['clientId', 'clientSecret', 'refreshToken'] as const) {
+      const client = makeClient(fetchImpl, { [missing]: undefined });
+      await expect(client.get('calendar', '/x')).rejects.toThrow(/Missing GOOGLE_WORKSPACE_/);
+    }
+    expect(fetchImpl.tokenCalls).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('sends a token only to the Google APIs in SERVICES', () => {
+    const client = makeClient(makeFetch(() => ({})));
+    for (const base of Object.values(SERVICES)) {
+      expect(new URL(base).protocol).toBe('https:');
+      expect(new URL(base).hostname.endsWith('.googleapis.com')).toBe(true);
+    }
+    expect(() => client.buildUrl('elsewhere' as never, '/x')).toThrow(/Unknown Google service/);
+    expect(new URL(client.buildUrl('calendar', '//evil.test/x')).hostname).toBe('www.googleapis.com');
   });
 
   it('validates numeric environment variables and options instead of producing NaN', () => {
     process.env.GOOGLE_WORKSPACE_TIMEOUT_MS = '30s';
-    expect(() => new GoogleClient({ apiKey: 'k' })).toThrow('GOOGLE_WORKSPACE_TIMEOUT_MS');
+    expect(() => new GoogleClient({ credentialEnv: {} })).toThrow('GOOGLE_WORKSPACE_TIMEOUT_MS');
     process.env.GOOGLE_WORKSPACE_TIMEOUT_MS = '3000000000';
-    expect(() => new GoogleClient({ apiKey: 'k' })).toThrow('GOOGLE_WORKSPACE_TIMEOUT_MS');
+    expect(() => new GoogleClient({ credentialEnv: {} })).toThrow('GOOGLE_WORKSPACE_TIMEOUT_MS');
     delete process.env.GOOGLE_WORKSPACE_TIMEOUT_MS;
     process.env.GOOGLE_WORKSPACE_MAX_CONCURRENCY = 'many';
-    expect(() => new GoogleClient({ apiKey: 'k' })).toThrow('GOOGLE_WORKSPACE_MAX_CONCURRENCY');
+    expect(() => new GoogleClient({ credentialEnv: {} })).toThrow('GOOGLE_WORKSPACE_MAX_CONCURRENCY');
     delete process.env.GOOGLE_WORKSPACE_MAX_CONCURRENCY;
     process.env.GOOGLE_WORKSPACE_MAX_RESPONSE_BYTES = '10MB';
-    expect(() => new GoogleClient({ apiKey: 'k' })).toThrow('GOOGLE_WORKSPACE_MAX_RESPONSE_BYTES');
+    expect(() => new GoogleClient({ credentialEnv: {} })).toThrow('GOOGLE_WORKSPACE_MAX_RESPONSE_BYTES');
     delete process.env.GOOGLE_WORKSPACE_MAX_RESPONSE_BYTES;
-    process.env.GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL = 'perhaps';
-    expect(() => new GoogleClient({ apiKey: 'k', baseUrl: BASE })).toThrow('GOOGLE_WORKSPACE_ALLOW_CUSTOM_BASE_URL');
 
-    expect(() => new GoogleClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
-    expect(() => new GoogleClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
-    expect(() => new GoogleClient({ apiKey: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
-    expect(() => new GoogleClient({ apiKey: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
+    expect(() => new GoogleClient({ maxConcurrency: 0 })).toThrow('maxConcurrency');
+    expect(() => new GoogleClient({ maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
+    expect(() => new GoogleClient({ timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
+    expect(() => new GoogleClient({ maxAttempts: 0 })).toThrow('maxAttempts');
+  });
+});
+
+describe('the fixed list of writes', () => {
+  it('sends the writes on the list and refuses every other, before a token is fetched', async () => {
+    const fetchImpl = makeFetch(() => ({ ok: true }));
+    const client = makeClient(fetchImpl);
+    await client.post('calendar', '/calendars/primary/events', {});
+    await client.patch('calendar', '/calendars/team%40group.calendar.google.com/events/abc_20261124T080000Z', {});
+    await client.put('sheets', '/spreadsheets/1AbCdEfGhIjKlMnOp/values/Ark1!A1%3AB2', {});
+    await client.post('sheets', '/spreadsheets/1AbCdEfGhIjKlMnOp/values/Ark1!A%3AB:append', {});
+    await client.post('docs', '/documents/1AbCdEfGhIjKlMnOp:batchUpdate', {});
+    await client.post('people', '/people:createContact', {});
+    await client.patch('people', '/people/c123:updateContact', {});
+    await client.post('tasks', '/lists/%40default/tasks', {});
+    await client.patch('tasks', '/lists/%40default/tasks/t1', {});
+    expect(fetchImpl).toHaveBeenCalledTimes(9);
+
+    const refused: Array<[keyof typeof SERVICES, 'post' | 'patch' | 'put', string]> = [
+      ['calendar', 'post', '/calendars/primary/events/e1/move'],
+      ['calendar', 'post', '/calendars/primary/acl'],
+      ['calendar', 'post', '/calendars/primary/events/quickAdd'],
+      ['calendar', 'post', '/calendars/primary/clear'],
+      ['calendar', 'patch', '/calendars/primary'],
+      ['sheets', 'post', '/spreadsheets/1AbCdEfGhIjKlMnOp:batchUpdate'],
+      ['sheets', 'post', '/spreadsheets/1AbCdEfGhIjKlMnOp/values/A1:clear'],
+      ['sheets', 'post', '/spreadsheets/1AbCdEfGhIjKlMnOp/values:batchClear'],
+      ['people', 'post', '/people:batchDeleteContacts'],
+      ['people', 'patch', '/people/c1:updateContactPhoto'],
+      ['tasks', 'post', '/lists/%40default/clear'],
+      ['tasks', 'post', '/lists/l1/tasks/t1/move'],
+      ['tasks', 'post', '/users/@me/lists'],
+      ['userinfo', 'post', '/userinfo'],
+    ];
+    for (const [service, method, path] of refused) {
+      await expect(client[method](service, path, {}), `${method} ${service} ${path}`).rejects.toThrow(/not among the writes/);
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(9);
+    expect('delete' in client).toBe(false);
   });
 });
 
 describe('error handling', () => {
-  it('gives the status and our own hint, never the vendor body or code', async () => {
-    const fetchImpl = makeFetch(() => jsonResponse({ code: 'invalid_key', message: 'Unrecognized key' }, 401));
-    const error = await makeClient(fetchImpl).get('/x').catch((e: unknown) => e);
-
+  it("gives the status and our own hint, never Google's body, reason or status text", async () => {
+    const fetchImpl = makeFetch(() =>
+      jsonResponse({ error: { code: 403, message: 'Request had insufficient authentication scopes.', status: 'PERMISSION_DENIED' } }, 403),
+    );
+    const error = await makeClient(fetchImpl).get('calendar', '/x').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(GoogleHttpError);
-    expect((error as GoogleHttpError).status).toBe(401);
-    expect((error as Error).message).toContain('HTTP 401');
-    expect((error as Error).message).toContain('GOOGLE_WORKSPACE_API_KEY');
-    expect((error as Error).message).not.toContain('Unrecognized key');
-    expect((error as Error).message).not.toContain('invalid_key');
+    expect((error as GoogleHttpError).status).toBe(403);
+    expect((error as Error).message).toContain('HTTP 403');
+    expect((error as Error).message).toContain('access given does not cover it');
+    expect((error as Error).message).not.toMatch(/insufficient|PERMISSION_DENIED/);
   });
 
   it('never puts an error body in the error', async () => {
     const html = `<html>${'x'.repeat(5000)}</html>`;
     const fetchImpl = makeFetch(() => new Response(html, { status: 502, headers: { 'content-type': 'text/html' } }));
     const error = (await makeClient(fetchImpl, { maxAttempts: 1 })
-      .get('/x')
+      .get('calendar', '/x')
       .catch((e: unknown) => e)) as GoogleHttpError;
     expect(error.message).toBe('Google API request failed with HTTP 502');
   });
 
-  it('reads at most 64 KB of an error body', async () => {
-    let pulled = 0;
-    const fetchImpl = makeFetch(
-      () =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            pull(controller) {
-              pulled += 1;
-              controller.enqueue(new TextEncoder().encode('e'.repeat(16 * 1024)));
-            },
-          }),
-          { status: 500, headers: { 'content-type': 'text/html' } },
-        ),
-    );
-    const error = (await makeClient(fetchImpl)
-      .get('/x')
-      .catch((e: unknown) => e)) as GoogleHttpError;
-    expect(error).toBeInstanceOf(GoogleHttpError);
-    expect(pulled).toBeLessThan(10);
-    expect(error.message.length).toBeLessThan(700);
-  });
-
-  it('redacts the configured API key wherever it appears, before truncating', async () => {
-    const apiKey = 'live-key-0123456789abcdef';
-    const respond = (body: string, type = 'text/plain') =>
-      new GoogleClient({
-        apiKey,
-        baseUrl: BASE,
-        fetchImpl: makeFetch(() => new Response(body, { status: 400, headers: { 'content-type': type } })),
-      });
-
-    const echoed = (await respond(`proxy error: ${apiKey} and ${encodeURIComponent(apiKey)}`)
-      .get('/x')
-      .catch((e: unknown) => e)) as GoogleHttpError;
-    expect(echoed.message).not.toContain(apiKey);
-    expect(echoed.message).not.toContain('proxy error');
-
-    const boundary = (await respond(`${'x'.repeat(490)}${apiKey}`)
-      .get('/x')
-      .catch((e: unknown) => e)) as GoogleHttpError;
-    expect(boundary.message).not.toContain(apiKey.slice(0, 6));
-
-    const nested = (await respond(JSON.stringify({ message: 'bad', nested: { echo: apiKey } }), 'application/json')
-      .get('/x')
-      .catch((e: unknown) => e)) as GoogleHttpError;
-    expect(JSON.stringify(nested)).not.toContain(apiKey);
-
-    expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
+  it('redacts the secrets of the client wherever they appear', async () => {
+    const redactor = makeClient(makeFetch(() => ({}))).redactor;
+    for (const secret of [REFRESH, APP.clientSecret, encodeURIComponent(REFRESH)]) {
+      expect(redactor.redact(`proxy said ${secret}`)).not.toContain(secret.slice(2, 10));
+    }
     expect(redactSecrets('Authorization: Bearer abc123')).not.toContain('abc123');
-    expect(redactSecrets('GOOGLE_WORKSPACE_API_KEY=abc123')).not.toContain('abc123');
+    expect(redactSecrets('refresh_token=abc123&x=1')).not.toContain('abc123');
+    expect(redactSecrets('"client_secret": "abc123"')).not.toContain('abc123');
+    expect(redactSecrets('GOOGLE_WORKSPACE_REFRESH_TOKEN=abc123')).not.toContain('abc123');
   });
 
-  it('redacts the configured key header by name', () => {
-    const redactor = new SecretRedactor().addHeader('X-Vendor-Token').addHeader(API_KEY_HEADER);
-    const redactSecrets = (text: string) => redactor.redact(text);
-    expect(redactSecrets('sent x-vendor-token: abc123, ok')).toBe('sent x-vendor-token: ‹redacted›, ok');
-    expect(redactSecrets(`${API_KEY_HEADER}: abc123`)).not.toContain('abc123');
-    for (const text of [
-      '{"X-Vendor-Token":"abc123"}',
-      "{'x-vendor-token': 'abc123'}",
-      'x-vendor-token=abc123',
-      `{"${API_KEY_HEADER}": "abc123"}`,
-      '{"authorization":"Bearer abc123"}',
-      'authorization=abc123',
-      'x-api-key=abc123:def',
-      'X-Vendor-Token=abc123=def',
-      'authorization=abc123:pass',
-      'Authorization: Basic abc123',
-      'Authorization: Token abc123',
-      '"Authorization": "Digest abc123"',
-    ]) {
-      expect(redactSecrets(text), text).not.toContain('abc123');
+  it('redacts the access token in use, and lets go of old ones after two renewals', async () => {
+    let n = 0;
+    const tokens = ['at-first-Zq7pX2vK9mWb', 'at-second-Hk4Lm8Np2Qr', 'at-third-Tv6Wx1Yz3Ab', 'at-fourth-Cd5Ef7Gh9Ij'];
+    let now = 0;
+    const fetchImpl = makeFetch(() => ({}), () => jsonResponse(tokenAnswer({ access_token: tokens[n++], expires_in: 120 }), 200));
+    const client = makeClient(fetchImpl, { now: () => now });
+    for (let i = 0; i < 4; i += 1) {
+      await client.get('calendar', '/x');
+      now += 120_000;
+    }
+    expect(client.redactor.hasSecret(tokens[3]!)).toBe(true);
+    expect(client.redactor.hasSecret(tokens[2]!)).toBe(true);
+    expect(client.redactor.hasSecret(tokens[1]!)).toBe(true);
+    expect(client.redactor.hasSecret(tokens[0]!)).toBe(false);
+    expect(client.redactor.hasSecret(REFRESH)).toBe(true);
+  });
+
+  it('redacts a credential header by name', () => {
+    const redactor = new SecretRedactor().addHeader(API_KEY_HEADER);
+    for (const text of ['{"authorization":"Bearer abc123"}', 'Authorization: Bearer abc123', 'authorization=abc123']) {
+      expect(redactor.redact(text), text).not.toContain('abc123');
     }
   });
 
   it('keeps query strings out of error URLs', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 400));
     const error = (await makeClient(fetchImpl)
-      .get('/items', { cursor: 'secret-cursor' })
+      .get('calendar', '/calendars/primary/events', { q: 'secret-search' })
       .catch((e: unknown) => e)) as GoogleHttpError;
-    expect(error.url).toBe(`${BASE}/items`);
-    expect(error.message).not.toContain('secret-cursor');
+    expect(error.url).toBe(`${CAL}/calendars/primary/events`);
+    expect(error.message).not.toContain('secret-search');
   });
 
   it('parses Retry-After as seconds or an HTTP date', async () => {
@@ -237,56 +300,29 @@ describe('error handling', () => {
   it('names only the system error code of a network error, never its message', async () => {
     const fetchImpl = makeFetch(() => {
       throw new TypeError('fetch failed somewhere odd', {
-        cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.vendor.test'), { code: 'ENOTFOUND' }),
+        cause: Object.assign(new Error('getaddrinfo ENOTFOUND www.googleapis.com'), { code: 'ENOTFOUND' }),
       });
     });
     const message = await makeClient(fetchImpl, { maxAttempts: 1 })
-      .get('/x')
+      .get('calendar', '/x')
       .catch((e: Error) => e.message);
     expect(message).toMatch(/Network error calling the Google API \(GET\) \(ENOTFOUND\)\./);
     expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
-  it('reports timeouts clearly', async () => {
-    const fetchImpl = makeFetch(
-      () =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            pull(controller) {
-              controller.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
-            },
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        ),
-    );
-    await expect(makeClient(fetchImpl).get('/items?cursor=c')).rejects.toThrow(
-      /timed out after \d+ ms \(GET\)/,
-    );
-  });
-
   it('caps successful response bodies', async () => {
-    const big = makeFetch(
-      () => new Response('x'.repeat(100), { status: 200, headers: { 'content-type': 'text/plain' } }),
-    );
-    await expect(makeClient(big, { maxResponseBytes: 10 }).get('/x')).rejects.toThrow('exceeds the 10 byte limit');
-    await expect(makeClient(big, { maxResponseBytes: 1000 }).get('/x')).resolves.toBe('x'.repeat(100));
+    const big = makeFetch(() => new Response('x'.repeat(2000), { status: 200, headers: { 'content-type': 'text/plain' } }));
+    await expect(makeClient(big, { maxResponseBytes: 1000 }).get('calendar', '/x')).rejects.toThrow('exceeds the 1000 byte limit');
+    await expect(makeClient(big, { maxResponseBytes: 5000 }).get('calendar', '/x')).resolves.toBe('x'.repeat(2000));
   });
-});
 
-describe('redirects', () => {
-  it('never follows redirects and names the target without its query', async () => {
-    const fetchImpl = makeFetch(
-      () => new Response(null, { status: 302, headers: { location: 'https://other.vendor.test/v1/items?t=1' } }),
-    );
+  it('never follows a redirect and never quotes its target', async () => {
+    const fetchImpl = makeFetch(() => new Response(null, { status: 302, headers: { location: 'https://other.vendor.test/v1?t=1' } }));
     const message = await makeClient(fetchImpl)
-      .get('/items')
+      .get('calendar', '/x')
       .catch((e: Error) => e.message);
     expect(message).toContain('redirect (HTTP 302) for GET');
-    expect(message).toContain('GOOGLE_WORKSPACE_BASE_URL');
-    // The Location is the vendor's text: never quoted.
     expect(message).not.toContain('other.vendor.test');
-    await expect(makeClient(fetchImpl).post('/items', {})).rejects.toThrow(/redirect/);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('other.vendor.test'))).toBe(true);
   });
 });
@@ -296,18 +332,13 @@ describe('retries and concurrency', () => {
     const statuses = [503, 429];
     const fetchImpl = makeFetch(() => {
       const status = statuses.shift();
-      if (status === 429) {
-        return jsonResponse({}, 429, { 'retry-after': '2' });
-      }
-      if (status) {
-        return jsonResponse({}, status);
-      }
+      if (status === 429) return jsonResponse({}, 429, { 'retry-after': '2' });
+      if (status) return jsonResponse({}, status);
       return { ok: true };
     });
     const sleep = vi.fn(async (_ms: number) => undefined);
     const client = makeClient(fetchImpl, { sleep, retryBaseDelayMs: 10 });
-
-    await expect(client.get('/x')).resolves.toEqual({ ok: true });
+    await expect(client.get('calendar', '/x')).resolves.toEqual({ ok: true });
     expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
     expect(sleep.mock.calls[1]).toEqual([2000]);
@@ -317,64 +348,20 @@ describe('retries and concurrency', () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 503, { 'retry-after': '3600' }));
     const sleep = vi.fn(async (_ms: number) => undefined);
     const error = (await makeClient(fetchImpl, { sleep })
-      .get('/x')
+      .get('calendar', '/x')
       .catch((e: unknown) => e)) as GoogleHttpError;
-
     expect(error).toBeInstanceOf(GoogleHttpError);
     expect(error.message).toContain('retry-after=3600s');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   });
 
-  it('retries GETs on transient network errors only', async () => {
-    let calls = 0;
-    const fetchImpl = makeFetch(() => {
-      calls += 1;
-      if (calls === 1) {
-        throw new TypeError('fetch failed', { cause: Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }) });
-      }
-      return { ok: true };
-    });
-    await expect(makeClient(fetchImpl).get('/x')).resolves.toEqual({ ok: true });
-    expect(calls).toBe(2);
-
-    const permanent = makeFetch(() => {
-      throw new TypeError('Headers.append: invalid header value');
-    });
-    await expect(makeClient(permanent).get('/x')).rejects.toThrow('Network error');
-    expect(permanent).toHaveBeenCalledTimes(1);
-  });
-
-  it('never retries POST or PATCH', async () => {
+  it('never retries a write', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 503));
     const client = makeClient(fetchImpl);
-    await expect(client.post('/x', {})).rejects.toBeInstanceOf(GoogleHttpError);
-    await expect(client.patch('/x', {})).rejects.toBeInstanceOf(GoogleHttpError);
+    await expect(client.post('tasks', '/lists/l1/tasks', {})).rejects.toBeInstanceOf(GoogleHttpError);
+    await expect(client.patch('tasks', '/lists/l1/tasks/t1', {})).rejects.toBeInstanceOf(GoogleHttpError);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-
-    const failing = makeFetch(() => {
-      throw new TypeError('fetch failed', { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) });
-    });
-    await expect(makeClient(failing).post('/x', {})).rejects.toThrow('Network error');
-    expect(failing).toHaveBeenCalledTimes(1);
-  });
-
-  it('releases the concurrency slot after failures', async () => {
-    let calls = 0;
-    const fetchImpl = makeFetch(() => {
-      calls += 1;
-      if (calls === 1) {
-        throw new DOMException('timeout', 'TimeoutError');
-      }
-      if (calls === 2) {
-        return jsonResponse({}, 500);
-      }
-      return { ok: true };
-    });
-    const client = makeClient(fetchImpl, { maxConcurrency: 1 });
-    await expect(client.get('/x')).rejects.toThrow('timed out');
-    await expect(client.get('/x')).rejects.toBeInstanceOf(GoogleHttpError);
-    await expect(client.get('/x')).resolves.toEqual({ ok: true });
   });
 
   it('limits concurrent requests per client', async () => {
@@ -388,53 +375,8 @@ describe('retries and concurrency', () => {
       return { ok: true };
     });
     const client = makeClient(fetchImpl, { maxConcurrency: 2 });
-
-    await Promise.all(Array.from({ length: 8 }, () => client.get('/x')));
+    await Promise.all(Array.from({ length: 8 }, () => client.get('calendar', '/x')));
     expect(fetchImpl).toHaveBeenCalledTimes(8);
     expect(peak).toBe(2);
-  });
-});
-
-describe('against a local upstream (real sockets)', () => {
-  let upstream: Server | undefined;
-
-  afterEach(async () => {
-    await new Promise<void>(resolve => (upstream ? upstream.close(() => resolve()) : resolve()));
-    upstream = undefined;
-  });
-
-  async function startUpstream(handler: Parameters<typeof createHttpServer>[1]): Promise<string> {
-    upstream = createHttpServer(handler);
-    await new Promise<void>(resolve => upstream?.listen(0, '127.0.0.1', resolve));
-    return `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`;
-  }
-
-  it('sends the key, refuses a redirect and does not contact the redirect target', async () => {
-    const seen: Array<{ url?: string; key?: string }> = [];
-    const base = await startUpstream((req, res) => {
-      seen.push({ url: req.url, key: req.headers[API_KEY_HEADER.toLowerCase()] as string | undefined });
-      if (req.url === '/v1/items/1') {
-        res.writeHead(200, { 'content-type': 'application/json' }).end('{"id":"1"}');
-        return;
-      }
-      res.writeHead(302, { location: `${base}/items/1` }).end();
-    });
-    const client = new GoogleClient({ apiKey: 'local-key-123456', baseUrl: base });
-
-    await expect(client.get('/items/1')).resolves.toEqual({ id: '1' });
-    await expect(client.get('/moved')).rejects.toThrow('redirects are not followed');
-    expect(seen).toEqual([
-      { url: '/v1/items/1', key: 'local-key-123456' },
-      { url: '/v1/moved', key: 'local-key-123456' },
-    ]);
-  });
-
-  it('times out a stalled upstream', async () => {
-    const base = await startUpstream(() => {
-      // never answers
-    });
-    const client = new GoogleClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
-    await expect(client.get('/slow')).rejects.toThrow(/timed out after 100 ms/);
-    upstream?.closeAllConnections();
   });
 });

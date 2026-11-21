@@ -1,8 +1,8 @@
 {
   "name": "@borgels/mcp-server-google-workspace",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "mcpName": "io.github.borgels/mcp-server-google-workspace",
-  "description": "Unofficial MCP server for the Google API.",
+  "description": "Unofficial MCP server for Google Workspace: Calendar, Sheets, Docs, Contacts and Tasks, without restricted scopes.",
   "type": "module",
   "main": "./dist/transports/stdio.js",
   "exports": {
@@ -38,7 +38,13 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "google"
+    "google",
+    "google-workspace",
+    "calendar",
+    "sheets",
+    "docs",
+    "contacts",
+    "tasks"
   ],
   "author": "",
   "license": "Apache-2.0",
