@@ -1,6 +1,6 @@
 import { encodePathParam } from '../path-params.js';
 import type { UpstreamClient } from './client.js';
-import { hasOffset, isDate } from './values.js';
+import { hasOffset, isDate, nextDay, withSeconds } from './values.js';
 
 /**
  * Google Calendar API v3 (https://developers.google.com/workspace/calendar/api/v3/reference). Answers are cut down
@@ -101,11 +101,14 @@ export interface EventFields {
   attendees?: string[];
 }
 
-/** A start or end as the API takes it: `date` for a whole day, else `dateTime` (with the time zone when given). */
+/**
+ * A start or end as the API takes it: `date` for a whole day, else `dateTime` with seconds (the API refuses
+ * `10:00` without them) and the time zone when given, so `2026-11-22T10:00` with Europe/Copenhagen is 10:00 there.
+ */
 function eventTime(value: string, timeZone: string | undefined): Json {
   if (isDate(value)) return { date: value };
   if (!hasOffset(value) && !timeZone) throw new Error('A time without an offset needs timeZone, e.g. Europe/Copenhagen.');
-  return { dateTime: value, ...(timeZone ? { timeZone } : {}) };
+  return { dateTime: withSeconds(value), ...(timeZone ? { timeZone } : {}) };
 }
 
 export function eventBody(fields: EventFields): Json {
@@ -113,10 +116,15 @@ export function eventBody(fields: EventFields): Json {
   if (fields.summary !== undefined) body.summary = fields.summary;
   if (fields.description !== undefined) body.description = fields.description;
   if (fields.location !== undefined) body.location = fields.location;
-  if (fields.start !== undefined) body.start = eventTime(fields.start, fields.timeZone);
-  if (fields.end !== undefined) body.end = eventTime(fields.end, fields.timeZone);
   if (fields.start !== undefined && fields.end !== undefined && isDate(fields.start) !== isDate(fields.end)) {
     throw new Error('start and end must both be dates (a whole day) or both be times.');
+  }
+  if (fields.start !== undefined) body.start = eventTime(fields.start, fields.timeZone);
+  if (fields.end !== undefined) {
+    // Google's end date of a whole-day event is the day after the last day. An end on the start day itself means that
+    // one day, so it is moved to the day after rather than refused as an empty event.
+    const end = fields.start !== undefined && isDate(fields.end) && fields.end === fields.start ? nextDay(fields.end) : fields.end;
+    body.end = eventTime(end, fields.timeZone);
   }
   if (fields.attendees !== undefined) body.attendees = fields.attendees.map(email => ({ email }));
   return body;

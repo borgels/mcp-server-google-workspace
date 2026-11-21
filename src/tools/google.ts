@@ -105,12 +105,17 @@ const attendeesSchema = z.array(emailSchema).max(50).describe('E-mail addresses 
 const cellRows = (what: string) => z.array(z.array(cellSchema).max(500)).min(1).max(5000).describe(what);
 const dateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.');
 
+const START_NOTE =
+  'Start: YYYY-MM-DD for a whole day, or a time as YYYY-MM-DDTHH:MM (seconds optional) with timeZone, e.g. 2026-11-22T10:00 and Europe/Copenhagen, or with an offset, e.g. 2026-11-22T10:00+01:00.';
+const END_NOTE =
+  'End, in the same form as start. For a whole day the day after the last day; the start day itself also means that one day.';
+
 const eventFieldShape = {
   summary: lineSchema(500).optional().describe('Title of the event.'),
   description: textSchema(8000).optional().describe('Description.'),
   location: lineSchema(500).optional().describe('Place or address.'),
-  start: whenSchema.optional().describe('Start: YYYY-MM-DD for a whole day, or YYYY-MM-DDTHH:MM with an offset or a timeZone.'),
-  end: whenSchema.optional().describe('End, in the same form as start. For a whole day the day after the last day.'),
+  start: whenSchema.optional().describe(START_NOTE),
+  end: whenSchema.optional().describe(END_NOTE),
   timeZone: timeZoneSchema.optional().describe('Time zone for start and end without an offset, e.g. Europe/Copenhagen.'),
   attendees: attendeesSchema.optional(),
 };
@@ -188,8 +193,8 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
       ...eventFieldShape,
       calendarId: optionalCalendar,
       summary: lineSchema(500).describe('Title of the event.'),
-      start: whenSchema.describe('Start: YYYY-MM-DD for a whole day, or YYYY-MM-DDTHH:MM with an offset or a timeZone.'),
-      end: whenSchema.describe('End, in the same form as start. For a whole day the day after the last day.'),
+      start: whenSchema.describe(START_NOTE),
+      end: whenSchema.describe(END_NOTE),
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
@@ -259,7 +264,9 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
     description: 'Add rows after the last row of a table in a sheet. Text is stored as text, never as a formula.',
     inputShape: {
       spreadsheet: fileSchema('spreadsheets'),
-      range: rangeSchema.describe('The table, e.g. Sheet1!A:D.'),
+      range: rangeSchema.describe(
+        "The table: the sheet's name and its columns, e.g. Budget!A:D. Take the sheet's name from get_spreadsheet or create_spreadsheet.",
+      ),
       rows: cellRows('The rows to add.'),
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
@@ -274,7 +281,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
     description: 'Create a new, empty spreadsheet in the account\'s Drive. It is shared with no one.',
     inputShape: {
       title: lineSchema(200).describe('Title.'),
-      sheetTitles: z.array(lineSchema(100)).max(20).optional().describe('Names of the sheets (default one sheet).'),
+      sheetTitles: z.array(lineSchema(100)).max(20).optional().describe("Names of the sheets (default one sheet, named by Google in the account's language)."),
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: false,

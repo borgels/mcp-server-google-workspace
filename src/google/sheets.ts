@@ -135,10 +135,14 @@ export async function createSpreadsheet(
     body.sheets = input.sheetTitles.map(title => ({ properties: { title } }));
   }
   const answer = obj(await client.post('sheets', '/spreadsheets', body));
+  // A sheet Google names itself is named in the account's language (Sheet1, Ark1, ...), so the first sheet's name is
+  // given on its own for the next range.
+  const sheets = arr(answer.sheets).map(sheet => obj(obj(sheet).properties).title);
   return {
     spreadsheetId: answer.spreadsheetId,
     title: obj(answer.properties).title,
     url: answer.spreadsheetUrl,
-    sheets: arr(answer.sheets).map(sheet => obj(obj(sheet).properties).title),
+    firstSheet: sheets[0],
+    sheets,
   };
 }

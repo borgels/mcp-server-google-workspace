@@ -64,15 +64,20 @@ export function fileSchema(kind: 'spreadsheets' | 'document') {
     .describe(`The ${what}'s id, or its link (https://docs.google.com/${kind}/d/...).`);
 }
 
-/** A range in A1 notation, e.g. `Sheet1!A1:D20` or `'Q1 sales'!A:C`. One line, no `/`, `?` or `#`. */
+/**
+ * A range in A1 notation, e.g. `Budget!A1:D20` or `'Q1 sales'!A:C`. One line, no `/`, `?` or `#`. The name of a new
+ * sheet depends on the account's language (`Sheet1`, `Ark1`, ...), so the examples never assume one.
+ */
 export const rangeSchema = z
   .string()
   .trim()
   .min(1)
   .max(300)
   .regex(NO_CONTROLS)
-  .regex(/^[^/\\?#]+$/, 'A range is in A1 notation, e.g. Sheet1!A1:D20. Sheet names with / ? # or \\ cannot be used.')
-  .describe('A range in A1 notation, e.g. Sheet1!A1:D20.');
+  .regex(/^[^/\\?#]+$/, 'A range is in A1 notation, e.g. Budget!A1:D20. Sheet names with / ? # or \\ cannot be used.')
+  .describe(
+    "A range in A1 notation: the sheet's name, !, then the cells, e.g. Budget!A1:D20. Take the sheet's name from get_spreadsheet or create_spreadsheet; a new sheet's name depends on the account's language.",
+  );
 
 /** One cell value as sent with valueInputOption RAW: text is stored as text, never as a formula. */
 export const cellSchema = z.union([z.string().max(50_000), z.number().finite(), z.boolean(), z.null()]);
@@ -109,6 +114,21 @@ export function isDate(value: string): boolean {
 
 export function hasOffset(value: string): boolean {
   return OFFSET.test(value);
+}
+
+/**
+ * A date and time as RFC 3339 wants it, with seconds: `2026-11-22T10:00` becomes `2026-11-22T10:00:00` and
+ * `2026-11-22T10:00+01:00` becomes `2026-11-22T10:00:00+01:00`. The Calendar API refuses a time without seconds.
+ */
+export function withSeconds(value: string): string {
+  return value.replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(?=Z|[+-]\d{2}:\d{2}|$)/, '$1:00');
+}
+
+/** The day after a YYYY-MM-DD date, as YYYY-MM-DD. */
+export function nextDay(date: string): string {
+  const day = new Date(`${date}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + 1);
+  return day.toISOString().slice(0, 10);
 }
 
 /** One line of text with no control characters. */
