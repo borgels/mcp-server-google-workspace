@@ -106,7 +106,7 @@ const cellRows = (what: string) => z.array(z.array(cellSchema).max(500)).min(1).
 const dateSchema = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.');
 
 const START_NOTE =
-  'Start: YYYY-MM-DD for a whole day, or a time as YYYY-MM-DDTHH:MM (seconds optional) with timeZone, e.g. 2026-11-22T10:00 and Europe/Copenhagen, or with an offset, e.g. 2026-11-22T10:00+01:00.';
+  "Start: YYYY-MM-DD for a whole day, or a time as YYYY-MM-DDTHH:MM (seconds optional), e.g. 2026-11-22T10:00, in timeZone or else the calendar's own time zone, or with an offset, e.g. 2026-11-22T10:00+01:00.";
 const END_NOTE =
   'End, in the same form as start. For a whole day the day after the last day; the start day itself also means that one day.';
 
@@ -116,7 +116,7 @@ const eventFieldShape = {
   location: lineSchema(500).optional().describe('Place or address.'),
   start: whenSchema.optional().describe(START_NOTE),
   end: whenSchema.optional().describe(END_NOTE),
-  timeZone: timeZoneSchema.optional().describe('Time zone for start and end without an offset, e.g. Europe/Copenhagen.'),
+  timeZone: timeZoneSchema.optional().describe("Time zone for start and end without an offset, e.g. Europe/Copenhagen. Default: the calendar's own."),
   attendees: attendeesSchema.optional(),
 };
 
@@ -199,7 +199,10 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Created the event.',
-    upstream: [{ access: 'write', service: 'calendar', method: 'POST', path: '/calendars/{calendarId}/events' }],
+    upstream: [
+      { access: 'read', service: 'calendar', method: 'GET', path: '/calendars/{calendarId}/events' },
+      { access: 'write', service: 'calendar', method: 'POST', path: '/calendars/{calendarId}/events' },
+    ],
     handler: async (client, input) => createEvent(client, input),
   }),
   defineTool({
@@ -211,6 +214,7 @@ export const GOOGLE_WORKSPACE_TOOLS: ToolDefinition[] = [
     returnsUpstreamContent: true,
     summary: 'Changed the event.',
     upstream: [
+      { access: 'read', service: 'calendar', method: 'GET', path: '/calendars/{calendarId}/events' },
       { access: 'read', service: 'calendar', method: 'GET', path: '/calendars/{calendarId}/events/{eventId}' },
       { access: 'write', service: 'calendar', method: 'PATCH', path: '/calendars/{calendarId}/events/{eventId}' },
     ],

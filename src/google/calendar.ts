@@ -111,14 +111,38 @@ function eventTime(value: string, timeZone: string | undefined): Json {
   return { dateTime: withSeconds(value), ...(timeZone ? { timeZone } : {}) };
 }
 
+/** Refuses a start and end where one is a date and the other a time. */
+function checkTimes(fields: EventFields): void {
+  if (fields.start !== undefined && fields.end !== undefined && isDate(fields.start) !== isDate(fields.end)) {
+    throw new Error('start and end must both be dates (a whole day) or both be times.');
+  }
+}
+
+/** Whether start or end is a time of day without an offset, which needs a time zone. */
+function needsTimeZone(fields: EventFields): boolean {
+  return [fields.start, fields.end].some(value => value !== undefined && !isDate(value) && !hasOffset(value));
+}
+
+/**
+ * The fields with a time zone for a time without an offset: the one given, else the calendar's own, as Google Calendar
+ * itself places a time typed without a zone. The calendar's zone comes from its events list, asked for that field
+ * only: the events scope covers it, also for a calendar that is not in the person's calendar list.
+ */
+async function withCalendarTimeZone(client: UpstreamClient, calendarId: string, fields: EventFields): Promise<EventFields> {
+  checkTimes(fields);
+  if (fields.timeZone || !needsTimeZone(fields)) return fields;
+  const answer = obj(await client.get('calendar', `/calendars/${calendarId}/events`, { maxResults: 1, fields: 'timeZone' }));
+  const timeZone = str(answer.timeZone);
+  if (!timeZone) throw new Error('A time without an offset needs timeZone, e.g. Europe/Copenhagen; the calendar has none.');
+  return { ...fields, timeZone };
+}
+
 export function eventBody(fields: EventFields): Json {
   const body: Json = {};
   if (fields.summary !== undefined) body.summary = fields.summary;
   if (fields.description !== undefined) body.description = fields.description;
   if (fields.location !== undefined) body.location = fields.location;
-  if (fields.start !== undefined && fields.end !== undefined && isDate(fields.start) !== isDate(fields.end)) {
-    throw new Error('start and end must both be dates (a whole day) or both be times.');
-  }
+  checkTimes(fields);
   if (fields.start !== undefined) body.start = eventTime(fields.start, fields.timeZone);
   if (fields.end !== undefined) {
     // Google's end date of a whole-day event is the day after the last day. An end on the start day itself means that
@@ -133,7 +157,8 @@ export function eventBody(fields: EventFields): Json {
 export async function createEvent(client: UpstreamClient, input: EventFields & { calendarId?: string }): Promise<unknown> {
   const calendarId = calendarPath(input.calendarId ?? 'primary');
   // sendUpdates=none: Google sends the attendees no invitation or update (Google notes a few mails may still go out).
-  const created = await client.post('calendar', `/calendars/${calendarId}/events`, eventBody(input), { sendUpdates: 'none' });
+  const body = eventBody(await withCalendarTimeZone(client, calendarId, input));
+  const created = await client.post('calendar', `/calendars/${calendarId}/events`, body, { sendUpdates: 'none' });
   return shapeEvent(created);
 }
 
@@ -143,7 +168,7 @@ export async function updateEvent(
 ): Promise<unknown> {
   const calendarId = calendarPath(input.calendarId ?? 'primary');
   const path = `/calendars/${calendarId}/events/${encodePathParam(input.eventId, 'eventId')}`;
-  const body = eventBody(input);
+  const body = eventBody(await withCalendarTimeZone(client, calendarId, input));
   if (Object.keys(body).length === 0) throw new Error('Give at least one field to change.');
   // The fields as they were, so the change can be undone.
   const before = shapeEvent(await client.get('calendar', path));

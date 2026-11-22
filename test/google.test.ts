@@ -172,13 +172,63 @@ describe('calendar', () => {
     expect(oneDay.calls[0]!.body).toEqual({ summary: 'Nytår', start: { date: '2026-12-31' }, end: { date: '2027-01-01' } });
 
     for (const input of [
-      { summary: 'x', start: '2026-11-24T09:00', end: '2026-11-24T10:00' },
       { summary: 'x', start: '2026-11-24', end: '2026-11-24T10:00:00+01:00' },
+      { summary: 'x', start: '2026-11-24T09:00', end: '2026-11-24' },
     ]) {
       const refused = await call(routes, 'create_event', input);
       expect(refused.result.isError, JSON.stringify(input)).toBe(true);
       expect(refused.calls).toEqual([]);
     }
+  });
+
+  it("places a time without an offset or timeZone in the calendar's own time zone", async () => {
+    const routes = {
+      [`GET ${EVENTS}`]: { body: { kind: 'calendar#events', timeZone: 'Europe/Copenhagen', items: [] } },
+      [`POST ${EVENTS}`]: { body: EVENT },
+    };
+    const { result, calls } = await call(routes, 'create_event', { summary: 'Byggemøde', start: '2026-11-24T09:00', end: '2026-11-24T10:00' });
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(calls.map(c => c.method)).toEqual(['GET', 'POST']);
+    expect(query(calls[0]!.url)).toEqual({ maxResults: '1', fields: 'timeZone' });
+    expect(calls[1]!.body).toEqual({
+      summary: 'Byggemøde',
+      start: { dateTime: '2026-11-24T09:00:00', timeZone: 'Europe/Copenhagen' },
+      end: { dateTime: '2026-11-24T10:00:00', timeZone: 'Europe/Copenhagen' },
+    });
+
+    // The calendar is asked only when a time needs a zone: not with timeZone, an offset or whole days.
+    for (const input of <GatewayJsonObject[]>[
+      { summary: 'x', start: '2026-11-24T09:00', end: '2026-11-24T10:00', timeZone: 'Europe/Oslo' },
+      { summary: 'x', start: '2026-11-24T09:00+01:00', end: '2026-11-24T10:00+01:00' },
+      { summary: 'x', start: '2026-11-24', end: '2026-11-25' },
+    ]) {
+      const other = await call(routes, 'create_event', input);
+      expect(other.calls.map(c => c.method), JSON.stringify(input)).toEqual(['POST']);
+    }
+
+    // A calendar that gives no time zone: refused, nothing created.
+    const none = await call({ ...routes, [`GET ${EVENTS}`]: { body: { kind: 'calendar#events', items: [] } } }, 'create_event', {
+      summary: 'x',
+      start: '2026-11-24T09:00',
+      end: '2026-11-24T10:00',
+    });
+    expect(none.result.isError).toBe(true);
+    expect(none.calls.map(c => c.method)).toEqual(['GET']);
+  });
+
+  it("changes the time of an event in the calendar's own time zone when none is given", async () => {
+    const { result, calls } = await call(
+      {
+        [`GET ${EVENTS}`]: { body: { kind: 'calendar#events', timeZone: 'Europe/Copenhagen', items: [] } },
+        [`GET ${EVENTS}/abc123def456`]: { body: EVENT },
+        [`PATCH ${EVENTS}/abc123def456`]: { body: EVENT },
+      },
+      'update_event',
+      { eventId: 'abc123def456', start: '2026-11-24T13:00' },
+    );
+    expect(result.isError, result.content[0]?.text).toBeUndefined();
+    expect(calls.map(c => c.method)).toEqual(['GET', 'GET', 'PATCH']);
+    expect(calls[2]!.body).toEqual({ start: { dateTime: '2026-11-24T13:00:00', timeZone: 'Europe/Copenhagen' } });
   });
 
   it('changes an event with PATCH and answers with the values before', async () => {
