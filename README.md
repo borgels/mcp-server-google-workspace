@@ -19,7 +19,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for Google Wo
 | `google_list_calendars` | The calendars the account can see. |
 | `google_list_events` | Events in a calendar, by time and search text, recurring events as single occurrences. |
 | `google_get_event` | One event. |
-| `google_create_event` *(write)* | Create an event (`sendUpdates=none`: no invitation to attendees). |
+| `google_create_event` *(write)* | Create an event (`sendUpdates=none`: no invitation to attendees). A time without an offset or `timeZone` is in the calendar's own time zone. |
 | `google_update_event` *(write)* | Change title, description, place, time or attendees of an event (`sendUpdates=none`). |
 | `google_get_spreadsheet` | A spreadsheet's title and sheets. |
 | `google_read_range` | Values in a range (A1 notation), as shown. |

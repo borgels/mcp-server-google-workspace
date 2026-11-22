@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- `google_create_event` and `google_update_event` place a time without an
+  offset and without `timeZone` (`2026-11-22T10:00`) in the calendar's own
+  time zone, as Google Calendar does, instead of refusing it with "needs
+  timeZone". The zone is read from the calendar's events list (one `GET`
+  with `fields=timeZone`, covered by the events scope) only when a time
+  needs it. A given `timeZone` or offset is used as before.
+
 ## 0.5.0
 
 - `google_create_event` and `google_update_event` take a time in the form the
